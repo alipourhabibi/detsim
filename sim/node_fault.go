@@ -15,10 +15,11 @@ var (
 type crashFault struct {
 	Node     int
 	WipeDisk bool
+	Downtime Time
 }
 type pauseFault struct {
 	Node     int
-	Duration Time
+	Duration Duration
 }
 
 type restartFault struct {
@@ -26,21 +27,24 @@ type restartFault struct {
 }
 
 type resumeFault struct {
-	Node int
+	Node  int
+	Token uint64
 }
 
-func newCrashFault(nodeId int, WipeDisk bool) crashFault {
+func NewCrashFault(nodeId int, wipeDisk bool, downtime Time) crashFault {
 	return crashFault{
-		Node: nodeId,
+		Node:     nodeId,
+		WipeDisk: wipeDisk,
+		Downtime: downtime,
 	}
 }
 
-func (c crashFault) HashInto(w io.Writer) {
+func (f crashFault) HashInto(w io.Writer) {
 	wd := 0
-	if c.WipeDisk {
+	if f.WipeDisk {
 		wd = 1
 	}
-	hashInts(w, 'C', c.Node, wd)
+	hashInts(w, 'C', f.Node, wd, int(f.Downtime))
 }
 
 func (c crashFault) Equal(other any) bool {
@@ -51,23 +55,33 @@ func (c crashFault) Equal(other any) bool {
 	return o.Node == c.Node && o.WipeDisk == c.WipeDisk
 }
 
-func (c crashFault) Apply(s *Sim) {
-	s.node(c.Node).crash(c.WipeDisk)
+func (f crashFault) Apply(s *Sim) {
+	if !s.node(f.Node).crash(f.WipeDisk) {
+		s.trace.Note(EnNote, s.now, f.Node, "crash ignored: already down")
+		return
+	}
+	s.trace.Note(EnCrash, s.now, f.Node, "")
+	if f.WipeDisk {
+		s.trace.Note(EnDiskWiped, s.now, f.Node, "")
+	}
+	if f.Downtime > 0 {
+		s.pushRestart(f.Node, s.now+f.Downtime)
+	}
 }
 
 func (c crashFault) String() string {
 	return fmt.Sprintf("node %d crashed; wipe disk: %t", c.Node, c.WipeDisk)
 }
 
-func newPauseFault(nodeId int, duration Time) pauseFault {
+func NewPauseFault(nodeId int, duration Duration) pauseFault {
 	return pauseFault{
 		Node:     nodeId,
 		Duration: duration,
 	}
 }
 
-func (c pauseFault) HashInto(w io.Writer) {
-	hashInts(w, 'C', c.Node, int(c.Duration))
+func (f pauseFault) HashInto(w io.Writer) {
+	hashInts(w, 'Z', f.Node, int(f.Duration))
 }
 
 func (c pauseFault) Equal(other any) bool {
@@ -79,21 +93,30 @@ func (c pauseFault) Equal(other any) bool {
 }
 
 func (c pauseFault) Apply(s *Sim) {
-	s.node(c.Node).pause(c.Duration)
+	if c.Duration <= 0 {
+		panic(fmt.Sprintf("sim: pause duration must be positive, got %d", c.Duration))
+	}
+	tok, ok := s.node(c.Node).pause(s.now.Add(c.Duration))
+	if !ok {
+		s.trace.Note(EnNote, s.now, c.Node, "pause ignored: node not healthy")
+		return
+	}
+	s.trace.Note(EnPause, s.now, c.Node, "")
+	s.ScheduleFault(s.now.Add(c.Duration), resumeFault{Node: c.Node, Token: tok})
 }
 
 func (c pauseFault) String() string {
-	return fmt.Sprintf("node %d pauseed; duration: %d", c.Node, c.Duration)
+	return fmt.Sprintf("node %d paused; duration: %d", c.Node, c.Duration)
 }
 
-func newRestartFault(nodeId int) restartFault {
+func NewRestartFault(nodeId int) restartFault {
 	return restartFault{
 		Node: nodeId,
 	}
 }
 
 func (c restartFault) HashInto(w io.Writer) {
-	hashInts(w, 'C', c.Node)
+	hashInts(w, 'R', c.Node)
 }
 
 func (c restartFault) Equal(other any) bool {
@@ -105,22 +128,21 @@ func (c restartFault) Equal(other any) bool {
 }
 
 func (c restartFault) Apply(s *Sim) {
-	deps := s.deps(c.Node)
-	s.node(c.Node).restart(deps)
+	s.pushRestart(c.Node, s.now)
 }
 
 func (c restartFault) String() string {
 	return fmt.Sprintf("node %d restarted", c.Node)
 }
 
-func newResumeFault(nodeId int) resumeFault {
+func NewResumeFault(nodeId int) resumeFault {
 	return resumeFault{
 		Node: nodeId,
 	}
 }
 
 func (c resumeFault) HashInto(w io.Writer) {
-	hashInts(w, 'C', c.Node)
+	hashInts(w, 'M', c.Node, int(c.Token))
 }
 
 func (c resumeFault) Equal(other any) bool {
@@ -128,16 +150,22 @@ func (c resumeFault) Equal(other any) bool {
 	if !ok {
 		return false
 	}
-	return o.Node == c.Node
+	return o.Node == c.Node && o.Token == c.Token
 }
 
 func (c resumeFault) Apply(s *Sim) {
-	events := s.node(c.Node).resume()
+	events, ok := s.node(c.Node).resume(c.Token)
+	if !ok {
+		s.trace.Dropped(Event{At: s.now, Kind: EvFault, Target: c.Node},
+			"resume superseded")
+		return
+	}
+	s.trace.Note(EnResume, s.now, c.Node, "")
 	for _, e := range events {
 		s.requeue(e)
 	}
 }
 
 func (c resumeFault) String() string {
-	return fmt.Sprintf("node %d resumed", c.Node)
+	return fmt.Sprintf("node %d resumed with token %d", c.Node, c.Token)
 }

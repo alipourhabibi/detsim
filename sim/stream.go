@@ -5,6 +5,8 @@ import (
 	"math/rand/v2"
 )
 
+type nodeIdx int
+
 // The harness should not reach float rand
 type Rand interface {
 	Int64N(n int64) int64
@@ -25,6 +27,17 @@ const (
 	// next concern stream goes here
 )
 
+// nodeStream is a stable handle. reseedNode swaps the inner *rand.Rand, so a
+// Rand handed out before a restart keeps working and starts drawing from the
+// new sequence.
+type nodeStream struct {
+	r *rand.Rand
+}
+
+func (n *nodeStream) Int64N(x int64) int64 {
+	return n.r.Int64N(x)
+}
+
 type streams struct {
 	seed uint64
 
@@ -34,7 +47,7 @@ type streams struct {
 	fault *rand.Rand
 
 	// node is indexed by dense node index, not node id.
-	node []*rand.Rand
+	node []*nodeStream
 }
 
 func newStreams(seed uint64, n int) *streams {
@@ -44,23 +57,23 @@ func newStreams(seed uint64, n int) *streams {
 		loss:  newStream(seed, streamLoss),
 		dup:   newStream(seed, streamDup),
 		fault: newStream(seed, streamFault),
-		node:  make([]*rand.Rand, n),
+		node:  make([]*nodeStream, n),
 	}
 	for i := range s.node {
-		s.node[i] = newStream(seed, nodeStreamID(i, 0))
+		s.node[i] = &nodeStream{r: newStream(seed, nodeStreamID(i, 0))}
 	}
 	return s
 }
 
-func (s *streams) nodeRand(i int) Rand {
+func (s *streams) at(i nodeIdx) Rand {
 	return s.node[i]
 }
 
 // reseedNode gives a restarted node a fresh sequence. Without it a node that
 // crash-loops replays the same election timeouts every time, and whole
 // interleavings become unreachable.
-func (s *streams) reseedNode(i int, epoch uint64) {
-	s.node[i] = newStream(s.seed, nodeStreamID(i, epoch))
+func (s *streams) reseedNode(i nodeIdx, epoch uint64) {
+	s.node[i].r = newStream(s.seed, nodeStreamID(int(i), epoch)) // swap inner, keep pointer
 }
 
 func newStream(seed, id uint64) *rand.Rand {

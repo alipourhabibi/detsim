@@ -30,7 +30,7 @@ func (c *Ctx) Now() Time {
 // this node's stream
 func (c *Ctx) Rand() Rand {
 	c.check()
-	return c.sim.streams.nodeRand(c.self)
+	return c.sim.nodeRand(c.self)
 }
 
 // durable read
@@ -50,7 +50,7 @@ func (c *Ctx) Send(to int, msg Message) {
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSend, To: to, Msg: msg})
 }
 
-func (c *Ctx) SetTimer(name string, after Time) {
+func (c *Ctx) SetTimer(name string, after Duration) {
 	c.check()
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSetTimer, Name: name, After: after})
 }

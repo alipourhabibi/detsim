@@ -6,7 +6,7 @@ import (
 )
 
 // Fault is a simulated event: such as a partition, a crash,
-// a dropd link. They are scheduled like other events, they carry a
+// a dropped link. They are scheduled like other events, they carry a
 // timestamp, appear in the trace, and contribute to the run hash.
 type Fault interface {
 	Hashable

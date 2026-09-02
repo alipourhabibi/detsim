@@ -29,7 +29,9 @@ func NewPartitionFault(a, b []int) Fault {
 }
 
 func (f partitionFault) Apply(s *Sim) {
-	s.network.partition(f.A, f.B)
+	s.lastRule = s.network.partition(f.A, f.B)
+	s.trace.Note(EnPartition, s.now, -1,
+		fmt.Sprintf("partition %v|%v rule=%d", f.A, f.B, s.lastRule))
 }
 
 func (f partitionFault) HashInto(w io.Writer) {
@@ -55,7 +57,9 @@ func NewIsolateFault(node int) Fault {
 }
 
 func (f isolateFault) Apply(s *Sim) {
-	s.network.isolate(f.Node)
+	s.lastRule = s.network.isolate(f.Node)
+	s.trace.Note(EnPartition, s.now, f.Node,
+		fmt.Sprintf("isolate %d rule=%d", f.Node, s.lastRule))
 }
 
 func (f isolateFault) HashInto(w io.Writer) {
@@ -164,7 +168,7 @@ func (f resetConnectionFault) Apply(s *Sim) {
 }
 
 func (f resetConnectionFault) HashInto(w io.Writer) {
-	hashInts(w, 'U', f.From, f.To)
+	hashInts(w, 'X', f.From, f.To)
 }
 
 func (f resetConnectionFault) String() string {

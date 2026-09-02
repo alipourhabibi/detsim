@@ -48,15 +48,15 @@ Acceptance: a scripted fault sequence produces an identical trace across runs an
 You can articulate, in a written comment, your durable/volatile split and your partition-healing semantics.
 */
 
-type status uint8
+type Status uint8
 
 const (
-	Healthy status = iota
+	Healthy Status = iota
 	Crashed
 	Paused
 )
 
-func (s status) String() string {
+func (s Status) String() string {
 	switch s {
 	case Healthy:
 		return "Healthy"
@@ -68,9 +68,9 @@ func (s status) String() string {
 	return fmt.Sprintf("Status Unknown(%d)", uint8(s))
 }
 
-type Node struct {
+type node struct {
 	id      int
-	status  status
+	status  Status
 	handler Handler
 	storage Store
 	factory NodeFactory // kept for restart build
@@ -88,14 +88,16 @@ type Node struct {
 	// original Seq preserved, so relative order is exactly what it was.
 	deferred []Event
 
-	resumeAt Time
+	resumeAt   Time
+	pauseToken uint64
 }
 
-func newNode(id int, f NodeFactory) *Node {
-	return &Node{
+func newNode(id int, f NodeFactory, st Store) *node {
+	return &node{
 		id:      id,
 		factory: f,
 		timers:  map[string]uint64{},
+		storage: st,
 	}
 }
 
@@ -118,7 +120,10 @@ func (c nodeClock) now(simNow Time) Time {
 }
 
 // bump epoch, drop handler, optionally wipe
-func (n *Node) crash(wipeDisk bool) {
+func (n *node) crash(wipeDisk bool) bool {
+	if n.status == Crashed {
+		return false
+	}
 	n.epoch++
 	n.status = Crashed
 	n.handler = nil
@@ -129,47 +134,64 @@ func (n *Node) crash(wipeDisk bool) {
 
 	if wipeDisk {
 		n.storage.Wipe()
+	} else {
+		n.storage.Rollback()
 	}
+	return true
 }
 
-// bump epoch, handler = factory(...)
-func (n *Node) restart(d Deps) {
+// bump epoch, change status,
+// NOTE: no build yet
+func (n *node) reboot() bool {
 	if n.status != Crashed {
-		panic("sim: restart of a node that is not crashed")
+		return false
 	}
 
 	n.epoch++
-	n.status = Healthy
-	n.build(d)
-}
-func (n *Node) pause(until Time) {
-	if n.status != Healthy {
-		return // a crashed node has nothing to freeze
+	if n.epoch%2 != 0 {
+		panic(fmt.Sprintf("sim: node %d epoch %d is odd after restart", n.id, n.epoch))
 	}
+	n.status = Healthy
+	return true
+}
+
+// freezes the node until `until`
+// return Token identifying this pause.
+// used for scheduled resumes
+func (n *node) pause(until Time) (uint64, bool) {
+	if n.status != Healthy {
+		return 0, false // a crashed node has nothing to freeze
+	}
+	n.pauseToken++
 	n.status = Paused
 	n.resumeAt = until
+	return n.pauseToken, true
 }
 
 // returns deferred, clears it
-func (n *Node) resume() []Event {
+func (n *node) resume(token uint64) ([]Event, bool) {
 	if n.status != Paused {
-		return nil
+		return nil, false
+	}
+	if token != 0 && token != n.pauseToken {
+		return nil, false
 	}
 	n.status = Healthy
 	n.resumeAt = 0
 	held := n.deferred
 	n.deferred = nil
-	return held
+	return held, true
 }
 
-func (n *Node) bumpTimer(name string) uint64 {
+func (n *node) bumpTimer(name string) uint64 {
 	n.timers[name]++
 	return n.timers[name]
 }
 
-func (n *Node) build(deps Deps) {
+func (n *node) build(deps Deps) {
 	if n.factory == nil {
 		panic("sim: node has no factory")
 	}
 	n.handler = n.factory(n.id, deps)
+	n.storage = deps.Store
 }

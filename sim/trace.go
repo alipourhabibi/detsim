@@ -176,23 +176,27 @@ func (t *Trace) Sum() uint64 {
 }
 
 func (t *Trace) Len() int {
-	return len(t.entries)
+	if t.keep > 0 && t.count >= uint64(t.keep) {
+		return t.keep
+	}
+	return int(t.count)
 }
 
 func (t *Trace) Entries() []Entry {
-	if t.keep != KeepAll && t.keep > 0 && t.count >= uint64(t.keep) {
-		out := make([]Entry, t.keep)
-		out = append(out, t.entries[t.head:]...)
-		out = append(out, t.entries[:t.head]...)
+	if t.keep <= 0 {
+		return t.entries
 	}
-	if t.keep > 0 {
-		return t.entries[:t.count] // ring not full
+	if t.count < uint64(t.keep) { // ring not full yet
+		return t.entries[:t.count]
 	}
-	return t.entries
+	out := make([]Entry, t.keep)
+	out = append(out, t.entries[t.head:]...)
+	out = append(out, t.entries[:t.head]...)
+	return out
 }
 
 func (t *Trace) Dump(w io.Writer) error {
-	for _, e := range t.entries {
+	for _, e := range t.Entries() {
 		if _, err := fmt.Fprintln(w, e); err != nil {
 			return err
 		}
@@ -201,8 +205,9 @@ func (t *Trace) Dump(w io.Writer) error {
 }
 
 func (t *Trace) Filter(pred func(Entry) bool) []Entry {
-	out := make([]Entry, 0, len(t.Entries()))
-	for _, en := range t.Entries() {
+	all := t.Entries()
+	out := make([]Entry, 0, len(all))
+	for _, en := range all {
 		if pred(en) {
 			out = append(out, en)
 		}

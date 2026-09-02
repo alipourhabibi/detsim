@@ -50,7 +50,7 @@ type Effect struct {
 	To    int
 	Msg   Message
 	Name  string
-	After Time
+	After Duration
 	Key   string
 	Value []byte
 }
@@ -63,8 +63,4 @@ type Effects struct {
 func (e *Effects) reset() {
 	clear(e.buf) // GC
 	e.buf = e.buf[:0]
-}
-
-func (e *Effects) len() int {
-	return len(e.buf)
 }

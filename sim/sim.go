@@ -17,11 +17,7 @@ type Config struct {
 	TraceKeep  int // 0 none, KeepAll everything, N last N
 
 	NetworkConfig NetworkConfig
-}
-
-// Funcs and interfaces. Supplied by the caller, never serialized.
-type Wiring struct {
-	Factory NodeFactory
+	NewStore      func(id int) Store
 }
 
 type Sim struct {
@@ -30,48 +26,103 @@ type Sim struct {
 	seq     uint64
 	current uint64 // Seq of the event being executed, for Parent linking
 	events  uint64
-	wiring  *Wiring
 	started bool
 
 	queue   eventQueue
 	streams *streams
+
 	trace   *Trace
 	network *Network
 	effects Effects
 
-	nodes map[int]*Node
-	index map[int]int // node id -> dense index, for per-node streams
-	order []int       // id in order
+	nodes map[int]*node
+	index map[int]nodeIdx // node id -> dense index, for per-node streams
+	order []int           // id in order
 
 	lastRule RuleID
 }
 
+type Option func(*Sim)
+
+// overrides the default factory for one node.
+func WithFactory(id int, f NodeFactory) Option {
+	return func(s *Sim) {
+		if f == nil {
+			panic(fmt.Sprintf("sim: WithFactory(%d): nil factory", id))
+		}
+		s.node(id).factory = f
+	}
+}
+
 // Create a simulator with default network and nodes config
-func New(cfg Config, w *Wiring, nodes []int) *Sim {
+func New(cfg Config, nodes []int, factory NodeFactory, opts ...Option) *Sim {
+
+	if len(nodes) == 0 {
+		panic("sim: no nodes")
+	}
+
+	if cfg.TraceKeep < KeepAll {
+		panic(fmt.Sprintf("sim: TraceKeep must be >= %d (KeepAll), got %d", KeepAll, cfg.TraceKeep))
+	}
 
 	order := slices.Clone(nodes)
 	slices.Sort(order)
 
-	index := make(map[int]int, len(order))
-	nodeMap := make(map[int]*Node, len(order))
+	newStore := cfg.NewStore
+	if newStore == nil {
+		newStore = func(int) Store {
+			return NewMemStore()
+		}
+	}
+
+	index := make(map[int]nodeIdx, len(order))
+	nodeMap := make(map[int]*node, len(order))
+
 	for i, id := range order {
+
+		if id < 0 {
+			panic(fmt.Sprintf("sim: node id %d is negative; -1 is reserved as the no-node sentinel", id))
+		}
+
+		if i > maxNodeIndex {
+			panic(fmt.Sprintf("sim: %d nodes exceeds the limit of %d", len(order), maxNodeIndex+1))
+		}
+
 		if _, dup := index[id]; dup {
 			panic(fmt.Sprintf("sim: duplicate node id %d", id))
 		}
-		index[id] = i
-		nodeMap[id] = newNode(id, w.Factory)
+
+		st := newStore(id)
+		if st == nil {
+			panic(fmt.Sprintf("sim: NewStore returned nil for node %d", id))
+		}
+
+		index[id] = nodeIdx(i)
+		nodeMap[id] = newNode(id, factory, st)
 	}
 
-	return &Sim{
+	s := &Sim{
 		cfg:     cfg,
-		wiring:  w,
 		streams: newStreams(cfg.Seed, len(order)),
 		trace:   NewTrace(cfg.TraceLevel, cfg.TraceKeep),
-		network: newNetwork(cfg.NetworkConfig, order),
+		network: newNetwork(cfg.NetworkConfig, order, index),
 		nodes:   nodeMap,
 		order:   order,
 		index:   index,
 	}
+
+	for _, o := range opts {
+		o(s)
+	}
+
+	for _, id := range s.order {
+		if s.node(id).factory == nil {
+			panic(fmt.Sprintf("sim: node %d has no factory: pass one to New or use WithFactory", id))
+		}
+	}
+
+	return s
+
 }
 
 // Register overrides the default factory for one node. Must be called before
@@ -177,21 +228,24 @@ func (s *Sim) RunUntilQuiescent() error {
 	}
 }
 
-// RunHealed is the liveness harness: remove every fault, bring everyone up,
-// then run for a bounded stretch. Liveness is a run mode, not a predicate
-// that's why it isn't expressed as an invariant.
-func (s *Sim) RunHealed(budget Time) error {
-	s.network.healAll()
+// RunHealed is the liveness harness: clear every fault, bring everyone up, run
+// for a bounded stretch. Liveness has no instant to point at, so it is a run
+// mode rather than a predicate.
+func (s *Sim) RunHealed(budget Duration) error {
+	// Scheduled, not applied: repairs belong in the trace and the hash like any
+	// other fault.
+	s.ScheduleFault(s.now, NewHealFault(0)) // rule 0: heal everything
+
 	for _, id := range s.order {
-		n := s.node(id)
-		switch n.status {
+		switch s.node(id).status {
 		case Crashed:
-			s.pushRestart(id, s.now)
+			s.ScheduleFault(s.now, NewRestartFault(id))
 		case Paused:
-			resumeFault{Node: id}.Apply(s)
+			s.ScheduleFault(s.now, NewResumeFault(id))
 		}
 	}
-	return s.RunUntil(s.now + budget)
+
+	return s.RunUntil(s.now.Add(budget))
 }
 
 func (s *Sim) Now() Time {
@@ -218,20 +272,55 @@ func (s *Sim) Up(id int) bool {
 	return s.node(id).status == Healthy
 }
 
-func (s *Sim) node(id int) *Node {
+// Partition splits the cluster immediately and returns the RuleID for healing it.
+func (s *Sim) Partition(a, b []int) RuleID {
+	id := s.network.partition(a, b)
+	s.trace.Note(EnPartition, s.now, -1, fmt.Sprintf("partition %v|%v rule=%d", a, b, id))
+	return id
+}
+
+// Heal removes one rule. Heal(0) removes everything.
+func (s *Sim) Heal(id RuleID) {
+	s.network.heal(id)
+	s.trace.Note(EnHealed, s.now, -1, fmt.Sprintf("heal rule=%d", id))
+}
+
+// Handler returns a node's handler for assertions. nil while the node is
+// crashed. Read only: calling into it outside a callback has no Ctx.
+func (s *Sim) Handler(id int) Handler {
+	return s.node(id).handler
+}
+
+// Get reads a node's durable store directly, bypassing the handler. For
+// assertions about what survived a crash.
+func (s *Sim) Get(id int, key string) ([]byte, bool) {
+	return s.node(id).storage.Get(key)
+}
+
+func (s *Sim) Keys(id int) []string {
+	return s.node(id).storage.Keys()
+}
+
+// Status reports whether a node is healthy, crashed or paused. Up() only
+// distinguishes healthy from everything else.
+func (s *Sim) Status(id int) Status {
+	return s.node(id).status
+}
+
+func (s *Sim) node(id int) *node {
 	n, ok := s.nodes[id]
 	if !ok {
-		panic(fmt.Sprintf("sim: node %d does not exists in sim", id))
+		panic(fmt.Sprintf("sim: node %d does not exist in sim", id))
 	}
 	return n
 }
 
-func (s *Sim) idx(id int) int {
+func (s *Sim) idx(id int) nodeIdx {
 	i, ok := s.index[id]
 	if !ok {
 		panic(fmt.Sprintf("sim: unknown node %d", id))
 	}
-	return i
+	return nodeIdx(i)
 }
 
 // deps is rebuilt on every restart, never cached: reseedNode replaces the
@@ -241,7 +330,7 @@ func (s *Sim) deps(id int) Deps {
 }
 
 func (s *Sim) nodeRand(id int) Rand {
-	return s.streams.nodeRand(s.idx(id))
+	return s.streams.at(s.idx(id))
 }
 
 func (s *Sim) nodeNow(id int) Time {
@@ -303,6 +392,7 @@ func (s *Sim) run() (bool, error) {
 	if evt.Kind == EvFault {
 		s.trace.Record(evt)
 		evt.Payload.(Fault).Apply(s)
+		s.foldState()
 		return true, nil
 	}
 
@@ -352,8 +442,13 @@ func (s *Sim) run() (bool, error) {
 
 	switch evt.Kind {
 	case EvRestart:
-		n.restart(s.deps(evt.Target))
-		s.streams.reseedNode(s.idx(evt.Target), n.epoch)
+		if !n.reboot() {
+			s.trace.Dropped(evt, "restart of a node that is not crashed")
+			return true, nil
+		}
+		i := s.idx(evt.Target)
+		s.streams.reseedNode(i, n.epoch)
+		n.build(s.deps(evt.Target))
 		s.trace.Note(EnRestart, s.now, evt.Target, "")
 		n.handler.OnRestart(ctx)
 	case EvDeliver:
@@ -398,7 +493,7 @@ func (s *Sim) apply(node int, ef *Effect) {
 		// SetTimer reset rather than stack, which is what Raft wants from
 		// every AppendEntries.
 		token := n.bumpTimer(ef.Name)
-		s.pushTimer(node, ef.Name, s.now+ef.After, token)
+		s.pushTimer(node, ef.Name, s.now.Add(ef.After), token)
 	case EfSend:
 		s.send(node, ef.To, ef.Msg)
 	default:

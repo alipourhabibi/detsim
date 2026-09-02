@@ -28,7 +28,7 @@ type sender struct {
 	to       int
 	sent     uint64
 	count    uint64
-	interval Time
+	interval Duration
 }
 
 func (s *sender) OnRestart(ctx *Ctx) {
@@ -64,23 +64,24 @@ func setupSend(
 	from int,
 	to int,
 	count uint64,
-	interval Time,
+	interval Duration,
 ) *Sim {
 	t.Helper()
 
-	s := New(Config{
+	cfg := Config{
 		Seed:          seed,
 		MaxEvents:     10_000_000,
 		TraceLevel:    TraceHashEventsAndState,
 		TraceKeep:     KeepAll,
 		NetworkConfig: nc,
-	}, &Wiring{
-		Factory: func(id int, d Deps) Handler { return &sink{} },
-	}, []int{from, to})
+	}
+	s := New(cfg, []int{from, to},
+		func(int, Deps) Handler { return &sink{} },
+		WithFactory(from, func(int, Deps) Handler {
+			return &sender{to: to, count: count, interval: interval}
+		}),
+	)
 
-	s.Register(from, func(id int, d Deps) Handler {
-		return &sender{to: to, count: count, interval: interval}
-	})
 	s.Start()
 	return s
 }
@@ -99,7 +100,7 @@ func collect(s *Sim, from, to int) sendResult {
 	}
 }
 
-func runSend(t *testing.T, nc NetworkConfig, seed uint64, from, to int, count uint64, interval Time) sendResult {
+func runSend(t *testing.T, nc NetworkConfig, seed uint64, from, to int, count uint64, interval Duration) sendResult {
 	t.Helper()
 	s := setupSend(t, nc, seed, from, to, count, interval)
 	if err := s.RunUntilQuiescent(); err != nil {

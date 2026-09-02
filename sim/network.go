@@ -2,12 +2,11 @@ package sim
 
 import (
 	"fmt"
-	"slices"
 )
 
 /*
 1. Delay
-2. FIFO (TCP) vs Recording links
+2. FIFO (TCP) vs Reordering links
 3. Loss
 4. Duplication
 5. Partition
@@ -21,7 +20,7 @@ Configurable:
 2. Loss probability
 3. Duplication probability
 4. Partition predicate supporting asymmetric splits
-5. FIFO/Recording toggle
+5. FIFO/Reordering toggle
 */
 
 type DelayKind uint8
@@ -95,7 +94,7 @@ type rule struct {
 
 type Network struct {
 	links [][]link // indexed by node index
-	index map[int]int
+	index map[int]nodeIdx
 	order []int // sorted node ids
 
 	rules  []rule
@@ -106,7 +105,6 @@ type Network struct {
 
 type NetworkConfig struct {
 	Delay          DelaySpec // serializable description, not the Delay interface
-	MaxMsgDelay    int64
 	LossPPM        uint32
 	DuplicationPPM uint32
 	IsReordering   bool // default is FIFO
@@ -115,19 +113,9 @@ type NetworkConfig struct {
 // Creates a new network struct with all links to default values
 func newNetwork(
 	config NetworkConfig,
-	nodes []int,
+	order []int,
+	index map[int]nodeIdx,
 ) *Network {
-	order := slices.Clone(nodes)
-	slices.Sort(order)
-
-	index := make(map[int]int, len(order))
-	for i, id := range order {
-		if _, dup := index[id]; dup {
-			panic(fmt.Sprintf("sim: duplicate node id %d", id))
-		}
-		index[id] = i
-	}
-
 	links := make([][]link, len(order))
 	for i := range links {
 		links[i] = make([]link, len(order))
@@ -150,7 +138,7 @@ func newNetwork(
 	}
 }
 
-func (n *Network) idx(id int) int {
+func (n *Network) idx(id int) nodeIdx {
 	i, ok := n.index[id]
 	if !ok {
 		panic(fmt.Sprintf("sim: unknown node %d", id))
@@ -188,7 +176,6 @@ func (n *Network) reachable(from, to int, at Time) bool {
 	ok := true
 	for _, r := range n.rules {
 		if r.pred(from, to, at) {
-			// TODO should the last match win?
 			ok = !r.block // last match wins
 		}
 	}

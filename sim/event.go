@@ -3,7 +3,12 @@ package sim
 import "fmt"
 
 // Virtual time in milliseconds
+// Time is an absolute instant in virtual milliseconds.
 type Time int64
+
+// Duration is a span of virtual milliseconds. Distinct from Time so a duration
+// can never be passed where an instant is expected.
+type Duration int64
 
 type EventKind uint8
 
@@ -13,6 +18,14 @@ const (
 	EvRestart                  // a crashed node comes back up
 	EvFault                    // the harness changes the simulator
 )
+
+func (t Time) Add(d Duration) Time {
+	return t + Time(d)
+}
+
+func (t Time) Sub(u Time) Duration {
+	return Duration(t - u)
+}
 
 type Event struct {
 	At     Time
@@ -26,7 +39,7 @@ type Event struct {
 	Token uint64 // EvTimer only: the timer's token at schedule time
 	Name  string // EvTimer only: timer name
 
-	Payload any // message body or timer name
+	Payload Hashable // message body or timer name
 }
 
 func (k EventKind) String() string {

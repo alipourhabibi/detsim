@@ -26,10 +26,10 @@ type defaultStore struct {
 	unsynced map[string]undo
 }
 
-func newDurable() Store {
+func NewMemStore() *defaultStore {
 	return &defaultStore{
-		data:     make(map[string][]byte),
-		unsynced: make(map[string]undo),
+		data:     map[string][]byte{},
+		unsynced: map[string]undo{},
 	}
 }
 

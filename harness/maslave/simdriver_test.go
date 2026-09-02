@@ -29,11 +29,9 @@ func TestMasterPingerDeterminism(t *testing.T) {
 	run := func(seed uint64) result {
 
 		config := sim.Config{
-			Seed:      seed,
-			MaxEvents: 1_000_000,
-			NetworkConfig: sim.NetworkConfig{
-				MaxMsgDelay: 10,
-			},
+			Seed:          seed,
+			MaxEvents:     1_000_000,
+			NetworkConfig: sim.NetworkConfig{},
 		}
 		s, drivers := NewMasterSlavePinger(config, masterID, slaveIDs())
 		if err := s.RunUntil(endTime); err != nil {

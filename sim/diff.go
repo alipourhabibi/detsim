@@ -15,24 +15,25 @@ type Divergence struct {
 
 // First index where two full traces disagree. nil if identical.
 func FirstDivergence(a, b *Trace) *Divergence {
-	minEntries := min(len(a.entries), len(b.entries))
+	ea, eb := a.Entries(), b.Entries()
+	minEntries := min(len(ea), len(eb))
 	for index := range minEntries {
-		if !entriesEqual(a.entries[index], b.entries[index]) {
+		if !entriesEqual(ea[index], eb[index]) {
 			return &Divergence{
 				Index: index,
-				A:     a.entries[index],
-				B:     b.entries[index],
+				A:     ea[index],
+				B:     eb[index],
 			}
 		}
 	}
-	if len(a.entries) != len(b.entries) {
+	if len(ea) != len(eb) {
 		d := &Divergence{Index: minEntries}
-		if len(a.entries) > minEntries {
-			d.A = a.entries[minEntries]
+		if len(ea) > minEntries {
+			d.A = ea[minEntries]
 			d.BMissing = true
 		}
-		if len(b.entries) > minEntries {
-			d.B = b.entries[minEntries]
+		if len(eb) > minEntries {
+			d.B = eb[minEntries]
 			d.AMissing = true
 		}
 		return d

@@ -95,7 +95,7 @@ func (p *PingPong) OnTick() bool {
 	return true
 }
 
-func (p *PingPong) PingDevlier(from int, msg Ball) {
+func (p *PingPong) PingDeliver(from int, msg Ball) {
 	if p.Rounds > p.Count {
 		return
 	}
@@ -103,7 +103,7 @@ func (p *PingPong) PingDevlier(from int, msg Ball) {
 	p.transport.Send(from, Ball{Round: p.Rounds, IsPing: false})
 }
 
-func (p *PingPong) PongDevlier(from int, msg Ball) {
+func (p *PingPong) PongDeliver(from int, msg Ball) {
 
 }
 
