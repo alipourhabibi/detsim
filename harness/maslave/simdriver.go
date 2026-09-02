@@ -82,7 +82,6 @@ func NewMasterSlavePinger(config sim.Config, masterNode int, slaveNodes []int) (
 			masterNode, newNode(slaveNodes, maslave.Master),
 		),
 	)
-	s.Register(masterNode, newNode(slaveNodes, maslave.Master))
 	s.Start()
 
 	return s, drivers

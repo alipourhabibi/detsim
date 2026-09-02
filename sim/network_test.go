@@ -109,8 +109,8 @@ func runSend(t *testing.T, nc NetworkConfig, seed uint64, from, to int, count ui
 	return collect(s, from, to)
 }
 
-func uniformDelay(max int64) DelaySpec {
-	return DelaySpec{Kind: DelayUniform, Max: max}
+func uniformDelay(max Duration) DelaySpec {
+	return DelaySpec{Kind: DelayUniform, Spread: max}
 }
 
 // TODO Read them more

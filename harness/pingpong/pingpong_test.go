@@ -19,7 +19,7 @@ func TestDeterministicSameProcess(t *testing.T) {
 			Seed:          seed,
 			MaxEvents:     1_000_000,
 			TraceLevel:    sim.TraceHashEventsAndState,
-			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Max: 20}},
+			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 		}
 		pa, pb, s := NewPingPong(config, 0, 1, 200)
 		if err := s.RunUntilQuiescent(); err != nil {
@@ -78,7 +78,7 @@ func TestSeedsDiverge(t *testing.T) {
 			Seed:          seed,
 			MaxEvents:     1_000_000,
 			TraceLevel:    sim.TraceHashEventsAndState,
-			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Max: 20}},
+			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 		}
 		_, _, s := NewPingPong(config, 0, 1, 200)
 		if err := s.RunUntilQuiescent(); err != nil {
@@ -118,7 +118,7 @@ func TestVirtualTimeIsFree(t *testing.T) {
 		Seed:          100,
 		MaxEvents:     10_000_000,
 		TraceLevel:    sim.TraceHashEventsAndState,
-		NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Max: 20}},
+		NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 	}
 	_, _, s := NewPingPong(config, 0, 1, rounds)
 

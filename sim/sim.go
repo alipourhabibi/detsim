@@ -125,15 +125,6 @@ func New(cfg Config, nodes []int, factory NodeFactory, opts ...Option) *Sim {
 
 }
 
-// Register overrides the default factory for one node. Must be called before
-// Start. Panics if id is unknown or Start has already run.
-func (s *Sim) Register(id int, f NodeFactory) {
-	if s.started {
-		panic("sim: Register after Start")
-	}
-	s.node(id).factory = f
-}
-
 // Start builds every handler in sorted id order, then calls OnRestart on each
 // so nodes can arm their initial timers.
 //
@@ -534,7 +525,7 @@ func (s *Sim) send(from, to int, payload Message) {
 
 func (s *Sim) scheduleDeliver(from, to int, payload Message) {
 	link := s.network.link(from, to)
-	at := s.now + link.delay.Sample(s.streams.delay)
+	at := s.now.Add(link.delay.Sample(s.streams.delay))
 
 	// In FIFO the ordering is preserved
 	if !link.reordering {

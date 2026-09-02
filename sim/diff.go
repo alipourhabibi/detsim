@@ -41,8 +41,7 @@ func FirstDivergence(a, b *Trace) *Divergence {
 	return nil
 }
 
-func (d *Divergence) Report(w io.Writer, a, b *Trace, ctx int) error {
-	ea, eb := a.Entries(), b.Entries()
+func (d *Divergence) Report(w io.Writer, ea, eb []Entry, ctx int) error {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "diverged at index %d\n\n", d.Index)

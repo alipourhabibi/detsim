@@ -15,7 +15,7 @@ var (
 type crashFault struct {
 	Node     int
 	WipeDisk bool
-	Downtime Time
+	Downtime Duration
 }
 type pauseFault struct {
 	Node     int
@@ -31,7 +31,7 @@ type resumeFault struct {
 	Token uint64
 }
 
-func NewCrashFault(nodeId int, wipeDisk bool, downtime Time) crashFault {
+func NewCrashFault(nodeId int, wipeDisk bool, downtime Duration) Fault {
 	return crashFault{
 		Node:     nodeId,
 		WipeDisk: wipeDisk,
@@ -40,19 +40,15 @@ func NewCrashFault(nodeId int, wipeDisk bool, downtime Time) crashFault {
 }
 
 func (f crashFault) HashInto(w io.Writer) {
-	wd := 0
-	if f.WipeDisk {
-		wd = 1
-	}
-	hashInts(w, 'C', f.Node, wd, int(f.Downtime))
+	h := hashTag(w, 'C')
+	h.node(f.Node)
+	h.bool(f.WipeDisk)
+	h.dur(f.Downtime)
 }
 
-func (c crashFault) Equal(other any) bool {
+func (f crashFault) Equal(other any) bool {
 	o, ok := other.(crashFault)
-	if !ok {
-		return false
-	}
-	return o.Node == c.Node && o.WipeDisk == c.WipeDisk
+	return ok && f == o
 }
 
 func (f crashFault) Apply(s *Sim) {
@@ -65,7 +61,7 @@ func (f crashFault) Apply(s *Sim) {
 		s.trace.Note(EnDiskWiped, s.now, f.Node, "")
 	}
 	if f.Downtime > 0 {
-		s.pushRestart(f.Node, s.now+f.Downtime)
+		s.pushRestart(f.Node, s.now.Add(f.Downtime))
 	}
 }
 
@@ -73,7 +69,7 @@ func (c crashFault) String() string {
 	return fmt.Sprintf("node %d crashed; wipe disk: %t", c.Node, c.WipeDisk)
 }
 
-func NewPauseFault(nodeId int, duration Duration) pauseFault {
+func NewPauseFault(nodeId int, duration Duration) Fault {
 	return pauseFault{
 		Node:     nodeId,
 		Duration: duration,
@@ -81,15 +77,14 @@ func NewPauseFault(nodeId int, duration Duration) pauseFault {
 }
 
 func (f pauseFault) HashInto(w io.Writer) {
-	hashInts(w, 'Z', f.Node, int(f.Duration))
+	h := hashTag(w, 'Z')
+	h.node(f.Node)
+	h.dur(f.Duration)
 }
 
-func (c pauseFault) Equal(other any) bool {
+func (f pauseFault) Equal(other any) bool {
 	o, ok := other.(pauseFault)
-	if !ok {
-		return false
-	}
-	return o.Node == c.Node && o.Duration == c.Duration
+	return ok && f == o
 }
 
 func (c pauseFault) Apply(s *Sim) {
@@ -109,22 +104,20 @@ func (c pauseFault) String() string {
 	return fmt.Sprintf("node %d paused; duration: %d", c.Node, c.Duration)
 }
 
-func NewRestartFault(nodeId int) restartFault {
+func NewRestartFault(nodeId int) Fault {
 	return restartFault{
 		Node: nodeId,
 	}
 }
 
-func (c restartFault) HashInto(w io.Writer) {
-	hashInts(w, 'R', c.Node)
+func (f restartFault) HashInto(w io.Writer) {
+	h := hashTag(w, 'R')
+	h.node(f.Node)
 }
 
-func (c restartFault) Equal(other any) bool {
+func (f restartFault) Equal(other any) bool {
 	o, ok := other.(restartFault)
-	if !ok {
-		return false
-	}
-	return o.Node == c.Node
+	return ok && f == o
 }
 
 func (c restartFault) Apply(s *Sim) {
@@ -135,22 +128,21 @@ func (c restartFault) String() string {
 	return fmt.Sprintf("node %d restarted", c.Node)
 }
 
-func NewResumeFault(nodeId int) resumeFault {
+func NewResumeFault(nodeId int) Fault {
 	return resumeFault{
 		Node: nodeId,
 	}
 }
 
-func (c resumeFault) HashInto(w io.Writer) {
-	hashInts(w, 'M', c.Node, int(c.Token))
+func (f resumeFault) HashInto(w io.Writer) {
+	h := hashTag(w, 'M')
+	h.node(f.Node)
+	h.u64(f.Token)
 }
 
-func (c resumeFault) Equal(other any) bool {
+func (f resumeFault) Equal(other any) bool {
 	o, ok := other.(resumeFault)
-	if !ok {
-		return false
-	}
-	return o.Node == c.Node && o.Token == c.Token
+	return ok && f == o
 }
 
 func (c resumeFault) Apply(s *Sim) {

@@ -1,5 +1,7 @@
 package sim
 
+import "fmt"
+
 // Ctx is one turn in the simulation, during which the harness acts as one node.
 type Ctx struct {
 	sim  *Sim
@@ -47,6 +49,12 @@ func (c *Ctx) Get(key string) ([]byte, bool) {
 
 func (c *Ctx) Send(to int, msg Message) {
 	c.check()
+	if to == c.self {
+		panic(fmt.Sprintf("sim: node %d sent to itself", to))
+	}
+	if _, ok := c.sim.index[to]; !ok {
+		panic(fmt.Sprintf("sim: node %d sent to unknown node %d", c.self, to))
+	}
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSend, To: to, Msg: msg})
 }
 

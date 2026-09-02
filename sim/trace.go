@@ -59,21 +59,40 @@ func (k EntryKind) String() string {
 		return "deferred"
 	case EnSent:
 		return "sent"
-	case EnNote:
-		return "note"
+	case EnDuplicated:
+		return "duplicated"
+	case EnTimerSet:
+		return "timerSet"
+	case EnTimerCancelled:
+		return "timerCancelled"
+	case EnDurableWrite:
+		return "durableWrite"
+	case EnSync:
+		return "sync"
 	case EnCrash:
 		return "crash"
 	case EnRestart:
 		return "restart"
+	case EnDiskWiped:
+		return "diskWiped"
 	case EnPause:
 		return "pause"
 	case EnResume:
 		return "resume"
+	case EnPartition:
+		return "partition"
+	case EnHealed:
+		return "healed"
+	case EnBuggify:
+		return "buggify"
+	case EnNote:
+		return "note"
 	case EnFault:
 		return "fault"
 	default:
 		return "unknown"
 	}
+
 }
 
 func (e Entry) String() string {
@@ -189,7 +208,7 @@ func (t *Trace) Entries() []Entry {
 	if t.count < uint64(t.keep) { // ring not full yet
 		return t.entries[:t.count]
 	}
-	out := make([]Entry, t.keep)
+	out := make([]Entry, 0, t.keep)
 	out = append(out, t.entries[t.head:]...)
 	out = append(out, t.entries[:t.head]...)
 	return out

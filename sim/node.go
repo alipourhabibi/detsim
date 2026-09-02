@@ -112,11 +112,11 @@ type Deps struct {
 }
 
 type nodeClock struct {
-	offset Time // fixed disagreement with sim time
+	offset Duration // fixed disagreement with sim time
 }
 
 func (c nodeClock) now(simNow Time) Time {
-	return simNow + c.offset
+	return simNow.Add(c.offset)
 }
 
 // bump epoch, drop handler, optionally wipe
@@ -193,5 +193,4 @@ func (n *node) build(deps Deps) {
 		panic("sim: node has no factory")
 	}
 	n.handler = n.factory(n.id, deps)
-	n.storage = deps.Store
 }

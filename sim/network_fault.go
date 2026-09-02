@@ -35,8 +35,9 @@ func (f partitionFault) Apply(s *Sim) {
 }
 
 func (f partitionFault) HashInto(w io.Writer) {
-	hashInts(w, 'P', f.A...)
-	hashInts(w, '|', f.B...)
+	h := hashTag(w, 'P')
+	h.nodes(f.A)
+	h.nodes(f.B)
 }
 
 func (f partitionFault) Equal(other any) bool {
@@ -63,7 +64,8 @@ func (f isolateFault) Apply(s *Sim) {
 }
 
 func (f isolateFault) HashInto(w io.Writer) {
-	hashInts(w, 'I', f.Node)
+	h := hashTag(w, 'I')
+	h.node(f.Node)
 }
 
 func (f isolateFault) String() string {
@@ -90,16 +92,20 @@ func (f healFault) Apply(s *Sim) {
 }
 
 func (f healFault) HashInto(w io.Writer) {
-	hashInts(w, 'H')
-}
-
-func (f healFault) String() string {
-	return "heal"
+	h := hashTag(w, 'H')
+	h.rule(f.ID) // currently dropped entirely
 }
 
 func (f healFault) Equal(other any) bool {
-	_, ok := other.(healFault)
-	return ok
+	o, ok := other.(healFault)
+	return ok && f == o
+}
+
+func (f healFault) String() string {
+	if f.ID == 0 {
+		return "heal all"
+	}
+	return fmt.Sprintf("heal rule=%d", f.ID)
 }
 
 type lossLinkFault struct {
@@ -116,7 +122,10 @@ func (f lossLinkFault) Apply(s *Sim) {
 }
 
 func (f lossLinkFault) HashInto(w io.Writer) {
-	hashInts(w, 'D', f.From, f.To, int(f.DropPPM))
+	h := hashTag(w, 'D')
+	h.node(f.From)
+	h.node(f.To)
+	h.u32(f.DropPPM)
 }
 
 func (f lossLinkFault) String() string {
@@ -142,7 +151,10 @@ func (f duplicateLinkFault) Apply(s *Sim) {
 }
 
 func (f duplicateLinkFault) HashInto(w io.Writer) {
-	hashInts(w, 'U', f.From, f.To, int(f.DuplicatePPM))
+	h := hashTag(w, 'U')
+	h.node(f.From)
+	h.node(f.To)
+	h.u32(f.DuplicatePPM)
 }
 
 func (f duplicateLinkFault) String() string {
@@ -168,7 +180,9 @@ func (f resetConnectionFault) Apply(s *Sim) {
 }
 
 func (f resetConnectionFault) HashInto(w io.Writer) {
-	hashInts(w, 'X', f.From, f.To)
+	h := hashTag(w, 'X')
+	h.node(f.From)
+	h.node(f.To)
 }
 
 func (f resetConnectionFault) String() string {
@@ -189,7 +203,9 @@ func (f blockLinkFault) Apply(s *Sim) {
 }
 
 func (f blockLinkFault) HashInto(w io.Writer) {
-	hashInts(w, 'B', f.From, f.To)
+	h := hashTag(w, 'B')
+	h.node(f.From)
+	h.node(f.To)
 }
 
 func (f blockLinkFault) String() string {

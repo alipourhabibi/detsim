@@ -31,44 +31,50 @@ const (
 )
 
 type DelaySpec struct {
-	Kind DelayKind // "constant", "uniform"
-	Base int64     // fixed latency added to every sample
-	Max  int64     // uniform upper bound
+	Kind   DelayKind // "constant", "uniform"
+	Base   Duration  // fixed latency added to every sample
+	Spread Duration  // width of the draw, so samples land in [Base, Base+Spread)
 }
 
 func (s DelaySpec) build() Delay {
+	if s.Base < 0 {
+		panic(fmt.Sprintf("sim: DelaySpec.Base %d is negative", s.Base))
+	}
 	switch s.Kind {
 	case DelayConstant:
 		return Constant{D: s.Base}
 	case DelayUniform:
-		return Uniform{Base: s.Base, Max: s.Max}
+		if s.Spread < 0 {
+			panic(fmt.Sprintf("sim: DelaySpec.Spread %d is negative", s.Spread))
+		}
+		return Uniform{Base: s.Base, Spread: s.Spread}
 	default:
 		panic(fmt.Sprintf("sim: unknown delay kind %d", s.Kind))
 	}
 }
 
 type Delay interface {
-	Sample(r Rand) Time
+	Sample(r Rand) Duration
 }
 
 type Constant struct {
-	D int64
+	D Duration
 }
 
-func (c Constant) Sample(Rand) Time {
-	return Time(c.D)
+func (c Constant) Sample(Rand) Duration {
+	return c.D
 }
 
 type Uniform struct {
-	Base int64
-	Max  int64
+	Base   Duration
+	Spread Duration
 }
 
-func (u Uniform) Sample(r Rand) Time {
-	if u.Max <= 0 {
-		return Time(u.Base)
+func (u Uniform) Sample(r Rand) Duration {
+	if u.Spread <= 0 {
+		return Duration(u.Base)
 	}
-	return Time(u.Base + r.Int64N(u.Max))
+	return u.Base + Duration(r.Int64N(int64(u.Spread)))
 }
 
 type link struct {
@@ -117,11 +123,12 @@ func newNetwork(
 	index map[int]nodeIdx,
 ) *Network {
 	links := make([][]link, len(order))
+	d := config.Delay.build()
 	for i := range links {
 		links[i] = make([]link, len(order))
 		for j := range len(links[i]) {
 			links[i][j] = link{
-				delay:      config.Delay.build(),
+				delay:      d,
 				reordering: config.IsReordering,
 				lossPPM:    config.LossPPM,
 				dupPPM:     config.DuplicationPPM,
