@@ -114,7 +114,7 @@ func uniformDelay(max Duration) DelaySpec {
 }
 
 // TODO Read them more
-// Get these from AI
+// Got these from AI
 
 // binomialTolerance returns how far, in events, an observed count may stray from
 // the expected count n*p before the test should fail, for n independent trials of
@@ -368,4 +368,140 @@ func TestReorderingModeActuallyReorders(t *testing.T) {
 		t.Fatal("no reordering observed; the FIFO test proves nothing under these parameters")
 	}
 	t.Logf("%d inversions in %d deliveries", inversions, len(r.delivers))
+}
+
+func TestUniformSpreadIsAWidth(t *testing.T) {
+	u := Uniform{Base: 20, Spread: 100}
+	r := newStream(1, 1)
+
+	minSeen, maxSeen := Duration(1<<62), Duration(0)
+	for range 10_000 {
+		d := u.Sample(r)
+		minSeen = min(minSeen, d)
+		maxSeen = max(maxSeen, d)
+	}
+
+	if minSeen < 20 {
+		t.Errorf("sample %d below Base", minSeen)
+	}
+	if maxSeen >= 120 {
+		t.Errorf("sample %d at or above Base+Spread", maxSeen)
+	}
+	if maxSeen <= 100 {
+		t.Errorf("max sample %d never exceeded 100; Spread treated as a ceiling",
+			maxSeen)
+	}
+}
+
+func TestZeroSpreadIsConstant(t *testing.T) {
+	u := Uniform{Base: 20, Spread: 0}
+	r := newStream(1, 1)
+	for range 100 {
+		if d := u.Sample(r); d != 20 {
+			t.Fatalf("sample = %d, want 20", d)
+		}
+	}
+}
+
+// Last match wins, so a later allow rule punches a hole through an earlier
+// block. That is what makes a bridge node expressible, one that reaches both
+// sides of a partition while the sides cannot reach each other.
+//
+// This is the only test that would catch a refactor flipping to first-match,
+// which would silently make bridge topologies unreachable rather than failing
+// anything.
+func TestBridgeNodeCrossesPartition(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1, 2, 3}, noop)
+	s.Start()
+
+	s.Partition([]int{0, 1}, []int{2, 3})
+
+	if s.network.reachable(0, 2, s.Now()) {
+		t.Fatal("setup: partition did not block 0->2")
+	}
+
+	// Allow rule added after the block: 1 <-> 2 becomes the bridge.
+	s.network.addRule(func(from, to int, _ Time) bool {
+		return (from == 1 && to == 2) || (from == 2 && to == 1)
+	}, false)
+
+	if !s.network.reachable(1, 2, s.Now()) {
+		t.Error("bridge 1->2 blocked; first match is winning")
+	}
+	if !s.network.reachable(2, 1, s.Now()) {
+		t.Error("bridge 2->1 blocked")
+	}
+	if s.network.reachable(0, 2, s.Now()) {
+		t.Error("allow rule leaked to 0->2; the predicate is too broad")
+	}
+}
+
+func TestOverlappingPartitionsHealIndependently(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1, 2, 3}, noop)
+	s.Start()
+
+	split := s.Partition([]int{0, 1}, []int{2, 3})
+	s.network.isolate(3)
+
+	if s.network.reachable(0, 2, s.Now()) {
+		t.Fatal("setup: partition not applied")
+	}
+	if s.network.reachable(2, 3, s.Now()) {
+		t.Fatal("setup: isolate not applied")
+	}
+
+	s.Heal(split)
+
+	if !s.network.reachable(0, 2, s.Now()) {
+		t.Error("healing the partition did not restore 0->2")
+	}
+	if s.network.reachable(2, 3, s.Now()) {
+		t.Error("healing the partition also removed the isolate rule")
+	}
+}
+
+// A scheduled heal can fire after a reset already cleared its rule. That is
+// normal, not an error.
+func TestHealUnknownRuleIsNoOp(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1}, noop)
+	s.Start()
+
+	s.Heal(RuleID(9999)) // never existed
+
+	if !s.network.reachable(0, 1, s.Now()) {
+		t.Fatal("healing an unknown rule broke reachability")
+	}
+}
+
+func TestIsolateBlocksBothDirections(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1, 2}, noop)
+	s.Start()
+
+	s.network.isolate(1)
+
+	if s.network.reachable(1, 0, s.Now()) {
+		t.Error("isolated node can still send")
+	}
+	if s.network.reachable(0, 1, s.Now()) {
+		t.Error("isolated node can still receive")
+	}
+	if !s.network.reachable(0, 2, s.Now()) {
+		t.Error("isolate leaked to an unrelated pair")
+	}
+}
+
+// resetConnection models a TCP reset: ordering guarantees restart from scratch,
+// so the FIFO cursor must go back to zero.
+func TestResetConnectionClearsFIFOCursor(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1}, noop)
+	s.Start()
+
+	l := s.network.link(0, 1)
+	l.lastArrival = 5000
+
+	s.network.resetConnection(0, 1)
+
+	if l.lastArrival != 0 {
+		t.Fatalf("lastArrival = %d after reset, want 0", l.lastArrival)
+	}
 }

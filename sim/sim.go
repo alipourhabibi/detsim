@@ -406,10 +406,6 @@ func (s *Sim) run() (bool, error) {
 		return true, nil
 
 	case n.status == Crashed && evt.Kind != EvRestart:
-		// Sent during downtime, so it carries the current epoch and passed
-		// above. Both checks are needed: epoch catches sent-before-crash,
-		// this catches sent-while-down. EvRestart is exempt, it is the thing
-		// that ends the downtime.
 		s.trace.Dropped(evt, "node down")
 		return true, nil
 
@@ -421,7 +417,8 @@ func (s *Sim) run() (bool, error) {
 
 	s.trace.Record(evt)
 
-	// dispatch
+	// dispatching...
+
 	s.effects.reset()
 
 	ctx := &Ctx{
@@ -474,9 +471,10 @@ func (s *Sim) apply(node int, ef *Effect) {
 	switch ef.Kind {
 	case EfPut:
 		n.storage.Put(ef.Key, ef.Value)
-		s.trace.Note(EnNote, s.now, node, "save "+ef.Key)
+		s.trace.Note(EnDurableWrite, s.now, node, ef.Key)
 	case EfSync:
 		n.storage.Sync()
+		s.trace.Note(EnSync, s.now, node, "")
 	case EfCancelTimer:
 		n.bumpTimer(ef.Name) // bumping the token invalidates the pending fire
 	case EfSetTimer:

@@ -78,8 +78,9 @@ func at(es []Entry, i int) string {
 	return es[i].String()
 }
 
-// Same hash? identical. Same count, different hash? content diverged.
-// Different count? control flow diverged. Different hunts.
+// Same hash? identical.
+// Same count, different hash? content diverged.
+// Different count? control flow diverged.
 func CompareRuns(a, b *Sim) string {
 	if a.trace.Sum() == b.trace.Sum() {
 		return "identical"
@@ -110,5 +111,5 @@ func eventsEqual(x, y Event) bool {
 	if x.Payload == nil || y.Payload == nil {
 		return x.Payload == nil && y.Payload == nil
 	}
-	return x.Payload.(Hashable).Equal(y.Payload)
+	return x.Payload.Equal(y.Payload)
 }

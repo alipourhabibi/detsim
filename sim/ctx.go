@@ -7,7 +7,7 @@ type Ctx struct {
 	sim  *Sim
 	self int
 	out  *Effects
-	gen  uint64 // sim.events at creation; guards use-after-callback
+	gen  uint64 // sim.events at creation; it guards the harness from use after callback
 }
 
 func (c *Ctx) check() {
@@ -44,8 +44,7 @@ func (c *Ctx) Get(key string) ([]byte, bool) {
 // --- effects: recorded now, applied when the turn ends ---
 //
 // Send does not send; Save does not write. The sim carries them out after the
-// callback, writes before sends, so a node can't reply to a vote it hasn't
-// persisted.
+// callback.
 
 func (c *Ctx) Send(to int, msg Message) {
 	c.check()
