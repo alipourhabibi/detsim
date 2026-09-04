@@ -161,12 +161,7 @@ func (t *Trace) hashEvents(e Event) {
 	t.h.Write(t.buf)
 
 	if e.Payload != nil {
-		hp, ok := e.Payload.(Hashable)
-		if !ok {
-			panic(fmt.Sprintf("sim: payload %T does not implement Hashable (seq=%d)",
-				e.Payload, e.Seq))
-		}
-		hp.HashInto(t.h)
+		e.Payload.HashInto(t.h)
 	}
 }
 
