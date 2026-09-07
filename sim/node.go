@@ -119,10 +119,16 @@ func (c nodeClock) now(simNow Time) Time {
 	return simNow.Add(c.offset)
 }
 
+type crashResult struct {
+	Crashed bool // false if it was already down
+	Wiped   bool
+	Lost    int // unsynced keys thrown away by the rollback
+}
+
 // bump epoch, drop handler, optionally wipe
-func (n *node) crash(wipeDisk bool) bool {
+func (n *node) crash(wipeDisk bool) crashResult {
 	if n.status == Crashed {
-		return false
+		return crashResult{}
 	}
 	n.epoch++
 	n.status = Crashed
@@ -132,12 +138,14 @@ func (n *node) crash(wipeDisk bool) bool {
 
 	clear(n.timers)
 
+	res := crashResult{Crashed: true}
 	if wipeDisk {
 		n.storage.Wipe()
+		res.Wiped = true
 	} else {
-		n.storage.Rollback()
+		res.Lost = n.storage.Rollback()
 	}
-	return true
+	return res
 }
 
 // bump epoch, change status,

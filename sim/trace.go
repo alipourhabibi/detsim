@@ -6,6 +6,8 @@ import (
 	"hash"
 	"hash/fnv"
 	"io"
+	"strconv"
+	"strings"
 )
 
 // Everything that can be hashed into the trace.
@@ -18,6 +20,12 @@ type Hashable interface {
 // an identical event sequence but divergent node state still differ.
 type StateDigester interface {
 	StateDigest(w io.Writer)
+}
+
+// StateReporter gives a short human-readable snapshot of what a node currently
+// believes: its role, its term, who it thinks the leader is.
+type StateReporter interface {
+	StateString() string
 }
 
 // A protocol message. Message is Hashable so payloads are checked at compile time
@@ -37,6 +45,7 @@ const (
 	EnTimerCancelled
 	EnDurableWrite
 	EnSync
+	EnRollback // unsynced writes thrown away by a crash
 	EnCrash
 	EnRestart
 	EnDiskWiped
@@ -47,6 +56,7 @@ const (
 	EnBuggify
 	EnNote
 	EnFault
+	EnState // a node changed what it believes
 )
 
 func (k EntryKind) String() string {
@@ -69,6 +79,8 @@ func (k EntryKind) String() string {
 		return "durableWrite"
 	case EnSync:
 		return "sync"
+	case EnRollback:
+		return "rollback"
 	case EnCrash:
 		return "crash"
 	case EnRestart:
@@ -89,6 +101,8 @@ func (k EntryKind) String() string {
 		return "note"
 	case EnFault:
 		return "fault"
+	case EnState:
+		return "state"
 	default:
 		return "unknown"
 	}
@@ -96,11 +110,48 @@ func (k EntryKind) String() string {
 }
 
 func (e Entry) String() string {
-	s := fmt.Sprintf("[%s] %s", e.Kind, e.Event)
-	if e.Reason != "" {
-		s += "  (" + e.Reason + ")"
+	node := e.Target
+	if e.Kind == EnSent || e.Kind == EnDuplicated {
+		node = e.Source // the sender is the one doing something
 	}
-	return s
+	nodeStr := "-"
+	if node >= 0 {
+		nodeStr = strconv.Itoa(node)
+	}
+
+	var what string
+	switch e.Kind {
+	case EnEvent, EnDropped, EnDeferred:
+		what = e.Event.Describe()
+	case EnSent, EnDuplicated:
+		what = fmt.Sprintf("%v -> %d", e.Event.Payload, e.Target)
+	default:
+		what = e.Reason
+	}
+
+	out := fmt.Sprintf("t=%-6d #%-4d n%-3s %-15s %s",
+		e.At, e.Seq, nodeStr, e.Kind, what)
+
+	// Only EnDropped and EnDeferred carry a reason separate from their content.
+	if e.Reason != "" && (e.Kind == EnDropped || e.Kind == EnDeferred) {
+		out += "  (" + e.Reason + ")"
+	}
+	return out
+}
+
+// DumpStorage prints only the entries that decide durability: writes, syncs,
+// rollbacks, wipes, crashes and restarts. For an acknowledge-before-durable
+// bug this is the entire investigation.
+func (t *Trace) DumpStorage(w io.Writer) error {
+	for _, e := range t.Entries() {
+		switch e.Kind {
+		case EnDurableWrite, EnSync, EnRollback, EnDiskWiped, EnCrash, EnRestart:
+			if _, err := fmt.Fprintln(w, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type Trace struct {
@@ -114,6 +165,8 @@ type Trace struct {
 	count uint64 // total entries ever recorded; entries may hold fewer
 	// seq   uint64 // per-entry counter; distinct from Event.Seq, which several
 	// entries can share when one event drains many effects
+
+	lastState map[int]string // last reported state per node, for change detection
 }
 
 type Entry struct {
@@ -139,10 +192,11 @@ const (
 
 func NewTrace(level Level, keep int) *Trace {
 	t := &Trace{
-		h:     fnv.New64a(),
-		buf:   make([]byte, 0, 64),
-		level: level,
-		keep:  keep,
+		h:         fnv.New64a(),
+		buf:       make([]byte, 0, 64),
+		level:     level,
+		keep:      keep,
+		lastState: map[int]string{},
 	}
 	if keep > 0 {
 		t.entries = make([]Entry, keep)
@@ -258,17 +312,21 @@ func (t *Trace) Sent(at Time, parent uint64, from, to int, msg Message) {
 	}, "")
 }
 
-// Note records something with no event behind it: a crash, a restart, a
-// partition, a buggify point firing.
-//
-// Notes do not fold into the hash. The fault event that caused one is already
-// hashed, so hashing both would double-count, and it would mean adding a note
-// call somewhere invalidates every stored corpus hash.
-func (t *Trace) Note(kind EntryKind, at Time, target int, reason string) {
+// Note records something with no event behind it: a write, a crash, a pause.
+// seq is the Seq of the event whose handler caused it, so effects group with
+// their cause in the output.
+func (t *Trace) Note(kind EntryKind, at Time, node int, detail string, seq uint64) {
 	if t.level == TraceOff {
 		return
 	}
-	t.storeEntry(Entry{Kind: kind, At: at, Reason: reason, Event: Event{At: at, Target: target}})
+	t.storeEntry(Entry{
+		Kind:   kind,
+		At:     at,
+		Seq:    seq,
+		Target: node,
+		Source: -1, // no peer involved
+		Reason: detail,
+	})
 }
 
 // FoldState mixes a node's state into the hash. Called after the drain, once
@@ -292,5 +350,208 @@ func (t *Trace) emit(kind EntryKind, e Event, reason string) {
 		return
 	}
 	t.hashEvents(e)
-	t.storeEntry(Entry{Kind: kind, At: e.At, Reason: reason, Event: e})
+	t.storeEntry(Entry{
+		Kind:   kind,
+		At:     e.At,
+		Seq:    e.Seq,
+		Parent: e.Parent,
+		Source: e.Source,
+		Target: e.Target,
+		Reason: reason,
+		Event:  e,
+	})
+}
+
+// Lanes writes a space-time diagram: one column per node, time downward,
+// messages as arrows between columns.
+//
+// This is the standard way to draw a distributed run. Reading down a column
+// gives one node's history. Reading an arrow gives a causal link.
+func (t *Trace) Lanes(w io.Writer, nodes []int) error {
+	col := make(map[int]int, len(nodes))
+	for i, id := range nodes {
+		col[id] = i
+	}
+	const width = 14
+
+	// header
+	fmt.Fprintf(w, "%-8s", "time")
+	for _, id := range nodes {
+		fmt.Fprintf(w, "%-*s", width, fmt.Sprintf("node %d", id))
+	}
+	fmt.Fprintln(w)
+
+	for _, e := range t.Entries() {
+		line := []rune(strings.Repeat(" ", width*len(nodes)))
+
+		put := func(c int, s string) {
+			for i, r := range []rune(s) {
+				if c*width+i < len(line) {
+					line[c*width+i] = r
+				}
+			}
+		}
+
+		switch e.Kind {
+		case EnEvent:
+			if e.Event.Kind == EvDeliver {
+				// arrow from sender's column to receiver's column
+				from, to := col[e.Event.Source], col[e.Event.Target]
+				lo, hi := min(from, to), max(from, to)
+				for c := lo*width + 6; c < hi*width+6; c++ {
+					line[c] = '-'
+				}
+				if to > from {
+					line[hi*width+6] = '>'
+				} else {
+					line[lo*width+6] = '<'
+				}
+				put(to, fmt.Sprintf("%v", e.Event.Payload))
+			} else {
+				put(col[e.Event.Target], "* "+e.Event.Name)
+			}
+
+		case EnDurableWrite:
+			put(col[e.Target], "write "+e.Reason)
+		case EnSync:
+			put(col[e.Target], "SYNC")
+		case EnRollback:
+			put(col[e.Target], "ROLLBACK")
+		case EnCrash:
+			put(col[e.Target], "## CRASH")
+		case EnRestart:
+			put(col[e.Target], "## up")
+		case EnPause, EnResume, EnDiskWiped:
+			put(col[e.Target], e.Kind.String())
+		case EnDropped:
+			put(col[e.Event.Target], "x "+e.Reason)
+		default:
+			continue // sends are implied by their delivery
+		}
+
+		fmt.Fprintf(w, "%-8d%s\n", e.At, strings.TrimRight(string(line), " "))
+	}
+	return nil
+}
+
+// Only the entries that carry the story: deliveries, durability, lifecycle.
+// Retries are collapsed, because twenty identical Acquire arrows say nothing
+// that one arrow and a count does not.
+func (t *Trace) Mermaid(w io.Writer, nodes []int) error {
+	fmt.Fprintln(w, "sequenceDiagram")
+	for _, id := range nodes {
+		fmt.Fprintf(w, "  participant n%d\n", id)
+	}
+
+	var (
+		lastAt    Time = -1
+		repeatMsg string
+		repeatN   int
+	)
+
+	flush := func() {
+		if repeatN > 1 {
+			fmt.Fprintf(w, "  Note over n0: (%s x%d)\n", repeatMsg, repeatN)
+		}
+		repeatN, repeatMsg = 0, ""
+	}
+
+	for _, e := range t.Entries() {
+		// A time marker whenever the clock moves, so gaps are visible.
+		if e.At != lastAt {
+			flush()
+			fmt.Fprintf(w, "  Note over n%d: t=%d\n", nodes[0], e.At)
+			lastAt = e.At
+		}
+
+		switch e.Kind {
+		case EnEvent:
+			if e.Event.Kind != EvDeliver {
+				continue
+			}
+			label := fmt.Sprintf("%v", e.Event.Payload)
+
+			// Collapse a run of identical retries.
+			if label == repeatMsg {
+				repeatN++
+				continue
+			}
+			flush()
+			repeatMsg, repeatN = label, 1
+
+			fmt.Fprintf(w, "  n%d->>n%d: %s\n", e.Event.Source, e.Event.Target, label)
+
+		case EnDurableWrite:
+			flush()
+			fmt.Fprintf(w, "  Note right of n%d: write %s\n", e.Target, e.Reason)
+		case EnSync:
+			flush()
+			fmt.Fprintf(w, "  Note right of n%d: SYNC\n", e.Target)
+		case EnRollback:
+			flush()
+			fmt.Fprintf(w, "  Note over n%d: ROLLBACK %s\n", e.Target, e.Reason)
+		case EnCrash:
+			flush()
+			fmt.Fprintf(w, "  Note over n%d: CRASH\n", e.Target)
+		case EnRestart:
+			flush()
+			fmt.Fprintf(w, "  Note over n%d: restart\n", e.Target)
+		case EnTimerSet:
+			if e.Reason == "lease" { // entering the critical section
+				flush()
+				fmt.Fprintf(w, "  activate n%d\n", e.Target)
+			}
+		case EnTimerCancelled:
+			if e.Reason == "lease" {
+				flush()
+				fmt.Fprintf(w, "  deactivate n%d\n", e.Target)
+			}
+		}
+	}
+	flush()
+	return nil
+}
+
+// FoldDown folds a marker for a crashed node.
+//
+// A crashed node has no handler and so no state to digest. Skipping it would
+// make a run where node 2 is down hash the same as one where node 2 is up with
+// empty state, so a fixed marker goes in instead.
+func (t *Trace) FoldDown(node int) {
+	if t.level < TraceHashEventsAndState {
+		return
+	}
+	var buf [9]byte
+	buf[0] = 'D' // down
+	binary.LittleEndian.PutUint64(buf[1:], uint64(node))
+	t.h.Write(buf[:])
+}
+
+// A snapshot every event would drown the trace. What is worth reading is the
+// transition: the instant a node changed its mind.
+func (t *Trace) ReportState(at Time, seq uint64, node int, state string) {
+	if t.level == TraceOff {
+		return
+	}
+	if t.lastState == nil {
+		t.lastState = map[int]string{}
+	}
+	if t.lastState[node] == state {
+		return
+	}
+	prev := t.lastState[node]
+	t.lastState[node] = state
+
+	detail := state
+	if prev != "" {
+		detail = prev + " -> " + state
+	}
+	t.storeEntry(Entry{
+		Kind:   EnState,
+		At:     at,
+		Seq:    seq,
+		Target: node,
+		Source: -1,
+		Reason: detail,
+	})
 }

@@ -51,15 +51,21 @@ func (f crashFault) Equal(other any) bool {
 	return ok && f == o
 }
 
+// node_fault.go
 func (f crashFault) Apply(s *Sim) {
-	if !s.node(f.Node).crash(f.WipeDisk) {
-		s.trace.Note(EnNote, s.now, f.Node, "crash ignored: already down")
+	res := s.node(f.Node).crash(f.WipeDisk)
+	if !res.Crashed {
+		s.trace.Note(EnNote, s.now, f.Node, "crash ignored: already down", s.current)
 		return
 	}
-	s.trace.Note(EnCrash, s.now, f.Node, "")
-	if f.WipeDisk {
-		s.trace.Note(EnDiskWiped, s.now, f.Node, "")
+
+	s.trace.Note(EnCrash, s.now, f.Node, "", s.current)
+	if res.Wiped {
+		s.trace.Note(EnDiskWiped, s.now, f.Node, "", s.current)
+	} else if res.Lost > 0 {
+		s.trace.Note(EnRollback, s.now, f.Node, fmt.Sprintf("%d unsynced keys lost", res.Lost), s.current)
 	}
+
 	if f.Downtime > 0 {
 		s.pushRestart(f.Node, s.now.Add(f.Downtime))
 	}
@@ -93,10 +99,10 @@ func (c pauseFault) Apply(s *Sim) {
 	}
 	tok, ok := s.node(c.Node).pause(s.now.Add(c.Duration))
 	if !ok {
-		s.trace.Note(EnNote, s.now, c.Node, "pause ignored: node not healthy")
+		s.trace.Note(EnNote, s.now, c.Node, "pause ignored: node not healthy", s.current)
 		return
 	}
-	s.trace.Note(EnPause, s.now, c.Node, "")
+	s.trace.Note(EnPause, s.now, c.Node, "", s.current)
 	s.ScheduleFault(s.now.Add(c.Duration), resumeFault{Node: c.Node, Token: tok})
 }
 
@@ -152,7 +158,7 @@ func (c resumeFault) Apply(s *Sim) {
 			"resume superseded")
 		return
 	}
-	s.trace.Note(EnResume, s.now, c.Node, "")
+	s.trace.Note(EnResume, s.now, c.Node, "", s.current)
 	for _, e := range events {
 		s.requeue(e)
 	}

@@ -31,7 +31,7 @@ func NewPartitionFault(a, b []int) Fault {
 func (f partitionFault) Apply(s *Sim) {
 	s.lastRule = s.network.partition(f.A, f.B)
 	s.trace.Note(EnPartition, s.now, -1,
-		fmt.Sprintf("partition %v|%v rule=%d", f.A, f.B, s.lastRule))
+		fmt.Sprintf("partition %v|%v rule=%d", f.A, f.B, s.lastRule), s.current)
 }
 
 func (f partitionFault) HashInto(w io.Writer) {
@@ -60,7 +60,7 @@ func NewIsolateFault(node int) Fault {
 func (f isolateFault) Apply(s *Sim) {
 	s.lastRule = s.network.isolate(f.Node)
 	s.trace.Note(EnPartition, s.now, f.Node,
-		fmt.Sprintf("isolate %d rule=%d", f.Node, s.lastRule))
+		fmt.Sprintf("isolate %d rule=%d", f.Node, s.lastRule), s.current)
 }
 
 func (f isolateFault) HashInto(w io.Writer) {
@@ -199,7 +199,7 @@ type blockLinkFault struct{ From, To int }
 
 func (f blockLinkFault) Apply(s *Sim) {
 	s.lastRule = s.network.blockDirection([]int{f.From}, []int{f.To})
-	s.trace.Note(EnFault, s.now, -1, fmt.Sprintf("block %d->%d rule=%d", f.From, f.To, s.lastRule))
+	s.trace.Note(EnFault, s.now, -1, fmt.Sprintf("block %d->%d rule=%d", f.From, f.To, s.lastRule), s.current)
 }
 
 func (f blockLinkFault) HashInto(w io.Writer) {

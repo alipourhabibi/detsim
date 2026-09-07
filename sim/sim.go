@@ -20,6 +20,17 @@ type Config struct {
 	NewStore      func(id int) Store
 }
 
+func (s *Sim) requireDigester(id int) {
+	if s.cfg.TraceLevel < TraceHashEventsAndState {
+		return
+	}
+	h := s.node(id).handler
+	if _, ok := h.(StateDigester); !ok {
+		panic(fmt.Sprintf("sim: node %d handler %T does not implement "+
+			"StateDigester, required at TraceLevel %v", id, h, s.cfg.TraceLevel))
+	}
+}
+
 type Sim struct {
 	now     Time
 	cfg     Config
@@ -139,6 +150,7 @@ func (s *Sim) Start() {
 
 	for _, id := range s.order {
 		s.node(id).build(s.deps(id))
+		s.requireDigester(id)
 	}
 	for _, id := range s.order {
 		n := s.node(id)
@@ -147,6 +159,8 @@ func (s *Sim) Start() {
 		n.handler.OnRestart(ctx)
 		s.drain(id)
 	}
+
+	s.reportStates()
 }
 
 func (s *Sim) ScheduleFault(at Time, f Fault) uint64 {
@@ -266,14 +280,14 @@ func (s *Sim) Up(id int) bool {
 // Partition splits the cluster immediately and returns the RuleID for healing it.
 func (s *Sim) Partition(a, b []int) RuleID {
 	id := s.network.partition(a, b)
-	s.trace.Note(EnPartition, s.now, -1, fmt.Sprintf("partition %v|%v rule=%d", a, b, id))
+	s.trace.Note(EnPartition, s.now, -1, fmt.Sprintf("partition %v|%v rule=%d", a, b, id), s.current)
 	return id
 }
 
 // Heal removes one rule. Heal(0) removes everything.
 func (s *Sim) Heal(id RuleID) {
 	s.network.heal(id)
-	s.trace.Note(EnHealed, s.now, -1, fmt.Sprintf("heal rule=%d", id))
+	s.trace.Note(EnHealed, s.now, -1, fmt.Sprintf("heal rule=%d", id), s.seq)
 }
 
 // Handler returns a node's handler for assertions. nil while the node is
@@ -384,6 +398,7 @@ func (s *Sim) run() (bool, error) {
 		s.trace.Record(evt)
 		evt.Payload.(Fault).Apply(s)
 		s.foldState()
+		s.reportStates() // a crash is exactly when beliefs change
 		return true, nil
 	}
 
@@ -437,7 +452,8 @@ func (s *Sim) run() (bool, error) {
 		i := s.idx(evt.Target)
 		s.streams.reseedNode(i, n.epoch)
 		n.build(s.deps(evt.Target))
-		s.trace.Note(EnRestart, s.now, evt.Target, "")
+		s.requireDigester(evt.Target)
+		s.trace.Note(EnRestart, s.now, evt.Target, "", evt.Seq)
 		n.handler.OnRestart(ctx)
 	case EvDeliver:
 		n.handler.OnMessage(ctx, evt.Source, evt.Payload.(Message))
@@ -449,8 +465,8 @@ func (s *Sim) run() (bool, error) {
 
 	s.drain(evt.Target)
 	s.foldState()
+	s.reportStates()
 	return true, nil
-
 }
 
 var drainOrder = [...]EffectKind{EfPut, EfSync, EfCancelTimer, EfSetTimer, EfSend}
@@ -471,18 +487,20 @@ func (s *Sim) apply(node int, ef *Effect) {
 	switch ef.Kind {
 	case EfPut:
 		n.storage.Put(ef.Key, ef.Value)
-		s.trace.Note(EnDurableWrite, s.now, node, ef.Key)
+		s.trace.Note(EnDurableWrite, s.now, node, ef.Key, s.current)
 	case EfSync:
 		n.storage.Sync()
-		s.trace.Note(EnSync, s.now, node, "")
+		s.trace.Note(EnSync, s.now, node, "", s.current)
 	case EfCancelTimer:
 		n.bumpTimer(ef.Name) // bumping the token invalidates the pending fire
+		s.trace.Note(EnTimerCancelled, s.now, node, ef.Name, s.current)
 	case EfSetTimer:
 		// Bump first, so an earlier fire for this name goes stale. That makes
 		// SetTimer reset rather than stack, which is what Raft wants from
 		// every AppendEntries.
 		token := n.bumpTimer(ef.Name)
 		s.pushTimer(node, ef.Name, s.now.Add(ef.After), token)
+		s.trace.Note(EnTimerSet, s.now, node, ef.Name, s.current)
 	case EfSend:
 		s.send(node, ef.To, ef.Msg)
 	default:
@@ -516,7 +534,7 @@ func (s *Sim) send(from, to int, payload Message) {
 	s.scheduleDeliver(from, to, payload)
 	if dup {
 		s.scheduleDeliver(from, to, payload)
-		s.trace.Note(EnNote, s.now, to, "duplicated")
+		s.trace.Note(EnNote, s.now, to, "duplicated", s.current)
 	}
 
 }
@@ -541,8 +559,48 @@ func (s *Sim) foldState() {
 		return
 	}
 	for _, id := range s.order { // sorted, not map order
-		if d, ok := s.node(id).handler.(StateDigester); ok {
-			s.trace.FoldState(id, d)
+		h := s.node(id).handler
+		if h == nil {
+			// Crashed. There is no volatile state to fold, and that absence is
+			// itself part of the run: fold a marker so a crashed node and a
+			// live one with empty state hash differently.
+			s.trace.FoldDown(id)
+			continue
+		}
+		s.trace.FoldState(id, h.(StateDigester))
+	}
+}
+
+// reportStates records belief changes. Runs at every trace level above off
+func (s *Sim) reportStates() {
+	if s.cfg.TraceLevel == TraceOff {
+		return
+	}
+	for _, id := range s.order {
+		h := s.node(id).handler
+		if h == nil {
+			s.trace.ReportState(s.now, s.current, id, "down")
+			continue
+		}
+		if r, ok := h.(StateReporter); ok {
+			s.trace.ReportState(s.now, s.current, id, r.StateString())
 		}
 	}
+}
+
+// States returns what every node currently believes, for assertions and for
+// printing on failure. Nodes that do not implement StateReporter are omitted.
+func (s *Sim) States() map[int]string {
+	out := make(map[int]string, len(s.order))
+	for _, id := range s.order {
+		h := s.node(id).handler
+		if h == nil {
+			out[id] = "down"
+			continue
+		}
+		if r, ok := h.(StateReporter); ok {
+			out[id] = r.StateString()
+		}
+	}
+	return out
 }

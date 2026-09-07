@@ -10,8 +10,8 @@ type Store interface {
 	Delete(key string)
 	Keys() []string // sorted, always
 	Sync()
-	Rollback() // drop everything written since the last Sync
-	Wipe()     // disk loss; faults only, never exposed to a harness
+	Rollback() int // drop everything written since the last Sync
+	Wipe()         // disk loss; faults only, never exposed to a harness
 }
 
 // undo remembers what a key looked like before the first write since the last
@@ -64,7 +64,8 @@ func (d *defaultStore) Sync() {
 	clear(d.unsynced)
 }
 
-func (d *defaultStore) Rollback() {
+func (d *defaultStore) Rollback() int {
+	n := len(d.unsynced)
 	for key, u := range d.unsynced {
 		if u.existed {
 			d.data[key] = u.value
@@ -73,6 +74,7 @@ func (d *defaultStore) Rollback() {
 		}
 	}
 	clear(d.unsynced)
+	return n
 }
 
 func (d *defaultStore) Wipe() {

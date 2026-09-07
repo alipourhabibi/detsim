@@ -33,8 +33,8 @@ func (c *countingRand) Int64N(n int64) int64 {
 // --- the premise -------------------------------------------------------------
 
 func TestGeneratePlanIsDeterministic(t *testing.T) {
-	a := GeneratePlan(testPlanConfig(), testNodes, newStream(42, streamFault))
-	b := GeneratePlan(testPlanConfig(), testNodes, newStream(42, streamFault))
+	a := GeneratePlan(testPlanConfig(), testNodes, NewStream(42, StreamFault))
+	b := GeneratePlan(testPlanConfig(), testNodes, NewStream(42, StreamFault))
 
 	if a.Len() != b.Len() {
 		t.Fatalf("same seed produced %d and %d faults", a.Len(), b.Len())
@@ -45,8 +45,8 @@ func TestGeneratePlanIsDeterministic(t *testing.T) {
 }
 
 func TestGeneratePlanVariesBySeed(t *testing.T) {
-	a := GeneratePlan(testPlanConfig(), testNodes, newStream(1, streamFault))
-	b := GeneratePlan(testPlanConfig(), testNodes, newStream(2, streamFault))
+	a := GeneratePlan(testPlanConfig(), testNodes, NewStream(1, StreamFault))
+	b := GeneratePlan(testPlanConfig(), testNodes, NewStream(2, StreamFault))
 
 	if a.String() == b.String() {
 		t.Fatal("different seeds produced the same plan")
@@ -59,8 +59,8 @@ func TestGeneratePlanIgnoresNodeOrder(t *testing.T) {
 	sorted := []int{0, 1, 2, 3, 4}
 	jumbled := []int{3, 0, 4, 1, 2}
 
-	a := GeneratePlan(testPlanConfig(), sorted, newStream(7, streamFault))
-	b := GeneratePlan(testPlanConfig(), jumbled, newStream(7, streamFault))
+	a := GeneratePlan(testPlanConfig(), sorted, NewStream(7, StreamFault))
+	b := GeneratePlan(testPlanConfig(), jumbled, NewStream(7, StreamFault))
 
 	if a.String() != b.String() {
 		t.Fatal("node ordering changed the plan")
@@ -82,7 +82,7 @@ func TestGeneratePlanDrawCountIsStateIndependent(t *testing.T) {
 	count := func(maxDown int) int {
 		cfg := testPlanConfig()
 		cfg.MaxDown = maxDown
-		r := &countingRand{inner: newStream(99, streamFault)}
+		r := &countingRand{inner: NewStream(99, StreamFault)}
 		GeneratePlan(cfg, testNodes, r)
 		return r.draws
 	}
@@ -102,7 +102,7 @@ func TestPickNodeDrawsOnceRegardless(t *testing.T) {
 		{0: true, 1: true},
 		{0: true, 1: true, 2: true, 3: true, 4: true}, // nothing available
 	} {
-		r := &countingRand{inner: newStream(1, streamFault)}
+		r := &countingRand{inner: NewStream(1, StreamFault)}
 		pickNode(r, testNodes, exclude)
 		if r.draws > 1 {
 			t.Fatalf("pickNode made %d draws with %d excluded, want at most 1",
@@ -112,7 +112,7 @@ func TestPickNodeDrawsOnceRegardless(t *testing.T) {
 }
 
 func TestExpGapAlwaysDrawsFourTimes(t *testing.T) {
-	r := &countingRand{inner: newStream(1, streamFault)}
+	r := &countingRand{inner: NewStream(1, StreamFault)}
 	nextGap(r, 100)
 	if r.draws != 4 {
 		t.Fatalf("expGap made %d draws, want exactly 4", r.draws)
@@ -129,7 +129,7 @@ func TestGeneratePlanRespectsMaxDown(t *testing.T) {
 	cfg.MaxDown = maxDown
 
 	for seed := uint64(1); seed <= 50; seed++ {
-		p := GeneratePlan(cfg, testNodes, newStream(seed, streamFault))
+		p := GeneratePlan(cfg, testNodes, NewStream(seed, StreamFault))
 
 		downUntil := map[int]Time{}
 		for _, f := range p.Faults {
@@ -157,7 +157,7 @@ func TestZeroWeightKindNeverGenerated(t *testing.T) {
 	cfg.Weights = Weights{Crash: 0, Pause: 1, Partition: 1, Heal: 1}
 
 	for seed := uint64(1); seed <= 50; seed++ {
-		p := GeneratePlan(cfg, testNodes, newStream(seed, streamFault))
+		p := GeneratePlan(cfg, testNodes, NewStream(seed, StreamFault))
 		for _, f := range p.Faults {
 			if _, isCrash := f.Fault.(crashFault); isCrash {
 				t.Fatalf("seed %d generated a crash with Crash weight 0", seed)
@@ -174,11 +174,11 @@ func TestAllZeroWeightsPanics(t *testing.T) {
 	}()
 	cfg := testPlanConfig()
 	cfg.Weights = Weights{}
-	GeneratePlan(cfg, testNodes, newStream(1, streamFault))
+	GeneratePlan(cfg, testNodes, NewStream(1, StreamFault))
 }
 
 func TestGeneratePlanIsSortedByTime(t *testing.T) {
-	p := GeneratePlan(testPlanConfig(), testNodes, newStream(5, streamFault))
+	p := GeneratePlan(testPlanConfig(), testNodes, NewStream(5, StreamFault))
 	for i := 1; i < p.Len(); i++ {
 		if p.Faults[i].At < p.Faults[i-1].At {
 			t.Fatalf("fault %d at t=%d follows one at t=%d",
@@ -189,7 +189,7 @@ func TestGeneratePlanIsSortedByTime(t *testing.T) {
 
 func TestGeneratePlanStaysWithinUntil(t *testing.T) {
 	cfg := testPlanConfig()
-	p := GeneratePlan(cfg, testNodes, newStream(5, streamFault))
+	p := GeneratePlan(cfg, testNodes, NewStream(5, StreamFault))
 	for _, f := range p.Faults {
 		if f.At >= cfg.Until {
 			t.Fatalf("fault at t=%d, Until is %d", f.At, cfg.Until)
@@ -202,7 +202,7 @@ func TestGeneratePlanStaysWithinUntil(t *testing.T) {
 // A partition with an empty side is not a partition. Both groups must be
 // non-empty for every draw.
 func TestSplitNodesBothSidesNonEmpty(t *testing.T) {
-	r := newStream(1, streamFault)
+	r := NewStream(1, StreamFault)
 	for range 1000 {
 		a, b, ok := splitNodes(r, testNodes)
 		if !ok {
@@ -221,14 +221,14 @@ func TestSplitNodesBothSidesNonEmpty(t *testing.T) {
 }
 
 func TestSplitNodesNeedsTwoNodes(t *testing.T) {
-	r := newStream(1, streamFault)
+	r := NewStream(1, StreamFault)
 	if _, _, ok := splitNodes(r, []int{0}); ok {
 		t.Fatal("splitNodes succeeded on a single node")
 	}
 }
 
 func TestPickPairIsDistinct(t *testing.T) {
-	r := newStream(1, streamFault)
+	r := NewStream(1, StreamFault)
 	for range 1000 {
 		from, to, ok := pickPair(r, testNodes)
 		if !ok {
@@ -241,7 +241,7 @@ func TestPickPairIsDistinct(t *testing.T) {
 }
 
 func TestPickNodeRespectsExclusion(t *testing.T) {
-	r := newStream(1, streamFault)
+	r := NewStream(1, StreamFault)
 	exclude := map[int]bool{0: true, 2: true, 4: true}
 
 	for range 500 {
@@ -256,7 +256,7 @@ func TestPickNodeRespectsExclusion(t *testing.T) {
 }
 
 func TestPickNodeReportsWhenEmpty(t *testing.T) {
-	r := newStream(1, streamFault)
+	r := NewStream(1, StreamFault)
 	all := map[int]bool{}
 	for _, id := range testNodes {
 		all[id] = true
@@ -267,7 +267,7 @@ func TestPickNodeReportsWhenEmpty(t *testing.T) {
 }
 
 func TestShuffledIsAPermutation(t *testing.T) {
-	r := newStream(1, streamFault)
+	r := NewStream(1, StreamFault)
 	for range 200 {
 		out := shuffled(r, testNodes)
 		sorted := slices.Clone(out)
@@ -300,7 +300,7 @@ func TestWeightTableSkipsZeroEntries(t *testing.T) {
 // generation ever reads live sim state, the plan stops being replayable and
 // nothing else here fails.
 func TestPlanReplayIsStable(t *testing.T) {
-	plan := GeneratePlan(testPlanConfig(), testNodes, newStream(31, streamFault))
+	plan := GeneratePlan(testPlanConfig(), testNodes, NewStream(31, StreamFault))
 
 	run := func() uint64 {
 		s := New(testConfig(31), testNodes,

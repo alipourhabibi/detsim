@@ -2,7 +2,7 @@
 
 A deterministic simulator for testing distributed systems.
 
-You write a protocol(say [raft](https://github.com/alipourhabibi/raft) for example) and you want to test weather it works fine or not. You can bring up 5 nodes of your code and start playing with that. You may even catch some bugs. But distributed systems bugs need bad luck: a crash at one exact moment, two messages arriving in the wrong order and many more. You can find about them in production when it runs for a while or try to make them happen on purpose.
+You write a protocol(say [raft](https://github.com/alipourhabibi/raft) for example) and you want to test whether it works fine or not. You can bring up 5 nodes of your code and start playing with that. You may even catch some bugs. But distributed systems bugs need bad luck: a crash at one exact moment, two messages arriving in the wrong order and many more. You can find about them in production when it runs for a while or try to make them happen on purpose.
 
 You can use simulator to run your protocol on it. The simulator runs on a fake network with fake failures. Nodes crash, messages get lost, the network splits in two. All run on one process with no real time and no real sockets.
 

@@ -18,12 +18,12 @@ var _ Rand = (*rand.Rand)(nil)
 // separate PCG sequence, so adding a stream leaves every existing seed
 // producing exactly the run it produced before.
 const (
-	streamDelay uint64 = iota + 1
-	streamLoss
-	streamDup
-	streamFault
-	streamBuggify
-	streamWorkload
+	StreamDelay uint64 = iota + 1
+	StreamLoss
+	StreamDup
+	StreamFault
+	StreamBuggify
+	StreamWorkload
 	// next concern stream goes here
 )
 
@@ -53,14 +53,14 @@ type streams struct {
 func newStreams(seed uint64, n int) *streams {
 	s := &streams{
 		seed:  seed,
-		delay: newStream(seed, streamDelay),
-		loss:  newStream(seed, streamLoss),
-		dup:   newStream(seed, streamDup),
-		fault: newStream(seed, streamFault),
+		delay: NewStream(seed, StreamDelay),
+		loss:  NewStream(seed, StreamLoss),
+		dup:   NewStream(seed, StreamDup),
+		fault: NewStream(seed, StreamFault),
 		node:  make([]*nodeStream, n),
 	}
 	for i := range s.node {
-		s.node[i] = &nodeStream{r: newStream(seed, nodeStreamID(i, 0))}
+		s.node[i] = &nodeStream{r: NewStream(seed, nodeStreamID(i, 0))}
 	}
 	return s
 }
@@ -73,10 +73,10 @@ func (s *streams) at(i nodeIdx) Rand {
 // crash-loops replays the same election timeouts every time, and whole
 // interleavings become unreachable.
 func (s *streams) reseedNode(i nodeIdx, epoch uint64) {
-	s.node[i].r = newStream(s.seed, nodeStreamID(int(i), epoch)) // swap inner, keep pointer
+	s.node[i].r = NewStream(s.seed, nodeStreamID(int(i), epoch)) // swap inner, keep pointer
 }
 
-func newStream(seed, id uint64) *rand.Rand {
+func NewStream(seed, id uint64) *rand.Rand {
 	return rand.New(rand.NewPCG(seed, id))
 }
 

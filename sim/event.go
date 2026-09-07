@@ -56,17 +56,22 @@ func (k EventKind) String() string {
 	return fmt.Sprintf("EvUnknown(%d)", uint8(k))
 }
 
-func (e Event) String() string {
+// Describe formats the event without the time and seq prefix
+func (e Event) Describe() string {
 	switch e.Kind {
 	case EvDeliver:
-		return fmt.Sprintf("t=%d #%d deliver %d->%d ep=%d %v", e.At, e.Seq, e.Source, e.Target, e.Epoch, e.Payload)
+		return fmt.Sprintf("deliver %d->%d ep=%d %v", e.Source, e.Target, e.Epoch, e.Payload)
 	case EvTimer:
-		return fmt.Sprintf("t=%d #%d timer %q node=%d tok=%d", e.At, e.Seq, e.Name, e.Target, e.Token)
+		return fmt.Sprintf("timer %q tok=%d", e.Name, e.Token)
 	case EvRestart:
-		return fmt.Sprintf("t=%d #%d restart node=%d ep=%d", e.At, e.Seq, e.Target, e.Epoch)
+		return fmt.Sprintf("restart ep=%d", e.Epoch)
 	case EvFault:
-		return fmt.Sprintf("t=%d #%d fault %v", e.At, e.Seq, e.Payload)
+		return fmt.Sprintf("fault %v", e.Payload)
 	default:
-		return fmt.Sprintf("t=%d #%d %v", e.At, e.Seq, e.Kind)
+		return e.Kind.String()
 	}
+}
+
+func (e Event) String() string {
+	return fmt.Sprintf("t=%d #%d %s", e.At, e.Seq, e.Describe())
 }

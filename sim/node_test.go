@@ -1,6 +1,8 @@
 package sim
 
 import (
+	"encoding/binary"
+	"io"
 	"testing"
 )
 
@@ -207,6 +209,13 @@ func TestStaleResumeDoesNotCancelLaterPause(t *testing.T) {
 type pingOnTimer struct {
 	peer     int
 	received int
+}
+
+func (n *pingOnTimer) StateDigest(w io.Writer) {
+	var buf [9]byte
+	buf[0] = 'P'
+	binary.LittleEndian.PutUint64(buf[1:], uint64(n.received))
+	w.Write(buf[:])
 }
 
 func (n *pingOnTimer) OnRestart(ctx *Ctx) {

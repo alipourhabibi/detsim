@@ -30,7 +30,7 @@ func Sweep(
 ) *Failure {
 
 	for seed := from; seed < to; seed++ {
-		r := newStream(seed, streamFault)
+		r := NewStream(seed, StreamFault)
 		plan := gen(seed, r)
 		s := build(seed, plan)
 		if err := check(s); err != nil {

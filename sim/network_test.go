@@ -71,7 +71,7 @@ func setupSend(
 	cfg := Config{
 		Seed:          seed,
 		MaxEvents:     10_000_000,
-		TraceLevel:    TraceHashEventsAndState,
+		TraceLevel:    TraceHashEvents,
 		TraceKeep:     KeepAll,
 		NetworkConfig: nc,
 	}
@@ -372,7 +372,7 @@ func TestReorderingModeActuallyReorders(t *testing.T) {
 
 func TestUniformSpreadIsAWidth(t *testing.T) {
 	u := Uniform{Base: 20, Spread: 100}
-	r := newStream(1, 1)
+	r := NewStream(1, 1)
 
 	minSeen, maxSeen := Duration(1<<62), Duration(0)
 	for range 10_000 {
@@ -395,7 +395,7 @@ func TestUniformSpreadIsAWidth(t *testing.T) {
 
 func TestZeroSpreadIsConstant(t *testing.T) {
 	u := Uniform{Base: 20, Spread: 0}
-	r := newStream(1, 1)
+	r := NewStream(1, 1)
 	for range 100 {
 		if d := u.Sample(r); d != 20 {
 			t.Fatalf("sample = %d, want 20", d)

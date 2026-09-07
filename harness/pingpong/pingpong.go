@@ -1,6 +1,9 @@
 package pingpong
 
 import (
+	"encoding/binary"
+	"io"
+
 	"github.com/alipourhabibi/detsim/protocol/pingpong"
 	"github.com/alipourhabibi/detsim/sim"
 )
@@ -20,6 +23,14 @@ func (t *transport) Send(to int, msg pingpong.Ball) {
 type driver struct {
 	node *pingpong.PingPong
 	turn *sim.Turn
+}
+
+func (d *driver) StateDigest(w io.Writer) {
+	var buf [17]byte
+	buf[0] = 'p'
+	binary.LittleEndian.PutUint64(buf[1:9], d.node.Count)
+	binary.LittleEndian.PutUint64(buf[9:17], d.node.Ticks)
+	w.Write(buf[:])
 }
 
 func (d *driver) OnRestart(ctx *sim.Ctx) {
