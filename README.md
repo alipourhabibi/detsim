@@ -2,227 +2,23 @@
 
 A deterministic simulator for testing distributed systems.
 
-You write a protocol(say [raft](https://github.com/alipourhabibi/raft) for example) and you want to test whether it works fine or not. You can bring up 5 nodes of your code and start playing with that. You may even catch some bugs. But distributed systems bugs need bad luck: a crash at one exact moment, two messages arriving in the wrong order and many more. You can find about them in production when it runs for a while or try to make them happen on purpose.
+You write a protocol(say [raft](https://github.com/alipourhabibi/raft) for example) and you want to test whether it works fine or not. You can bring up 5 nodes of your code and start playing with that. You may even catch some bugs. But distributed systems bugs need bad luck: a crash at one exact moment, two messages arriving in the wrong order and many more. You can find out about them in production when it runs for a while, or try to make them happen on purpose.
 
-You can use simulator to run your protocol on it. The simulator runs on a fake network with fake failures. Nodes crash, messages get lost, the network splits in two. All run on one process with no real time and no real sockets.
+You can use the simulator to run your protocol on it. The simulator runs on a fake network with fake failures. Nodes crash, messages get lost, the network splits in two. All run in one process with no real time and no real sockets.
 
 Every run is repeatable. Same seed gives the same run every time on every machine.
 
-You try to make the bad luck happen, thousands of time and tell you the seed number when things break.
-
-## Quick start
- 
-Two nodes play ping pong. Each one sends a ball to the other every 50ms.
- 
-You write two files. The **protocol** is your real code. It does not know the
-simulator exists. The **harness** connects your protocol with simulator.
- 
-### 1. The protocol
- 
-The node says what it needs (`Transport`) and someone else provides it.
- 
-```go
-package pingpong
- 
-import (
-	"encoding/binary"
-	"io"
-)
- 
-// What the node needs from the outside world.
-type Transport interface {
-	Send(to int, msg Ball)
-}
- 
-// The message. The two methods are needed so the simulator can put messages in
-// its hash.
-type Ball struct {
-	Round  uint64
-	IsPing bool
-}
- 
-func (b Ball) HashInto(w io.Writer) {
-	var buf [10]byte
-	buf[0] = 'b'
-	binary.LittleEndian.PutUint64(buf[1:9], b.Round)
-	if b.IsPing {
-		buf[9] = 1
-	}
-	w.Write(buf[:])
-}
- 
-func (b Ball) Equal(other any) bool {
-	o, ok := other.(Ball)
-	return ok && b.Round == o.Round && b.IsPing == o.IsPing
-}
- 
-// The node itself. No clock, no network, no goroutines.
-type Node struct {
-	Id    int
-	Peer  int
-	Round uint64
-	Pongs uint64
- 
-	transport Transport
-}
- 
-func New(id, peer int, t Transport) *Node {
-	return &Node{Id: id, Peer: peer, transport: t}
-}
- 
-// OnTick is called every 50ms by whoever owns the timer.
-func (n *Node) OnTick() {
-	n.Round++
-	n.transport.Send(n.Peer, Ball{Round: n.Round, IsPing: true})
-}
- 
-func (n *Node) OnPing(from int, b Ball) {
-	n.transport.Send(from, Ball{Round: b.Round, IsPing: false})
-}
- 
-func (n *Node) OnPong(from int, b Ball) {
-	n.Pongs++
-}
-```
- 
-### 2. The harness
- 
-This one imports `sim`. It does three jobs:
- 
-* turns simulator callbacks into protocol calls
-* gives the protocol a `Transport` that sends through the simulator
-* builds the `Sim`
-
-`sim.Turn` holds the current `Ctx` while a callback runs. The transport reads
-it from there. If the protocol tries to send at the wrong time, `Turn` panics
-instead of using a dead `Ctx`.
- 
-```go
-package pingpong
- 
-import (
-	"fmt"
- 
-	"github.com/alipourhabibi/detsim/protocol/pingpong"
-	"github.com/alipourhabibi/detsim/sim"
-)
- 
-const Interval = sim.Duration(50)
- 
-// Sends through the simulator, using whatever Ctx is active right now.
-type transport struct {
-	turn *sim.Turn
-}
- 
-func (t *transport) Send(to int, msg pingpong.Ball) {
-	t.turn.Ctx().Send(to, msg)
-}
- 
-// driver is what the simulator sees. It implements sim.Handler.
-type driver struct {
-	node *pingpong.Node
-	turn *sim.Turn
-}
- 
-func (d *driver) OnRestart(ctx *sim.Ctx) {
-	d.turn.Enter(ctx)
-	defer d.turn.Leave()
- 
-	ctx.SetTimer("tick", Interval)
-}
- 
-func (d *driver) OnTimer(ctx *sim.Ctx, name string) {
-	d.turn.Enter(ctx)
-	defer d.turn.Leave()
- 
-	d.node.OnTick()
-	ctx.SetTimer(name, Interval)
-}
- 
-func (d *driver) OnMessage(ctx *sim.Ctx, from int, msg sim.Message) {
-	d.turn.Enter(ctx)
-	defer d.turn.Leave()
- 
-	ball, ok := msg.(pingpong.Ball)
-	if !ok {
-		panic(fmt.Sprintf("harness: got %T, want pingpong.Ball", msg))
-	}
- 
-	if ball.IsPing {
-		d.node.OnPing(from, ball)
-	} else {
-		d.node.OnPong(from, ball)
-	}
-}
- 
-func (d *driver) Node() *pingpong.Node { return d.node }
- 
-func Build(cfg sim.Config, a, b int) (*sim.Sim, map[int]*driver) {
-	drivers := map[int]*driver{}
- 
-	factory := func(peer int) sim.NodeFactory {
-		return func(id int, deps sim.Deps) sim.Handler {
-			turn := &sim.Turn{}
-			d := &driver{
-				node: pingpong.New(id, peer, &transport{turn}),
-				turn: turn,
-			}
-			drivers[id] = d
-			return d
-		}
-	}
- 
-	s := sim.New(cfg, []int{a, b}, factory(b), sim.WithFactory(b, factory(a)))
-	return s, drivers
-}
-```
- 
-The factory runs again after every restart.
-
-### 3. Run it
- 
-```go
-cfg := sim.Config{
-	Seed:       42,
-	MaxEvents:  1_000_000,
-	TraceLevel: sim.TraceHashEvents,
-	TraceKeep:  sim.KeepAll,
-	NetworkConfig: sim.NetworkConfig{
-		Delay:   sim.DelaySpec{Kind: sim.DelayUniform, Base: 1, Spread: 4},
-		LossPPM: 10_000, // 1 percent of messages are lost
-	},
-}
- 
-s, drivers := Build(cfg, 0, 1)
-s.Start()
- 
-s.ScheduleFault(1000, sim.NewCrashFault(1, false, 500))
-s.ScheduleFault(2000, sim.NewPartitionFault([]int{0}, []int{1}))
-s.ScheduleFault(3000, sim.NewHealFault(0))
- 
-if err := s.RunUntil(5000); err != nil {
-	log.Fatal(err)
-}
- 
-fmt.Printf("hash=%016x events=%d pongs=%d\n",
-	s.Hash(), s.EventCount(), drivers[0].Node().Pongs)
-```
- 
-Node 1 dies at 1000 and comes back at 1500. The network splits at 2000 and is
-fixed at 3000. Some messages are lost the whole time.
- 
-Run it twice with seed 42 and the hash is the same. Change the seed and you get
-a different run: different delays, different lost messages, a different order.
+The simulator makes the bad luck happen thousands of times and tells you the seed number when things break.
 
 ## Main ideas
 
 ### Time is fake
 
-Time is a number that counts up. Nothing sleeps. run of 1 simulated hour finishes in few millisecond.
+Time is a number that counts up. Nothing sleeps. A run of 1 simulated hour finishes in a few milliseconds.
 
 ### Node handlers
 
-You will implement 3 handler for each of your nodes to interact with simiulator.
+You will implement 3 handlers for each of your nodes to interact with the simulator.
 
 ```go
 type Handler interface {
@@ -231,7 +27,7 @@ type Handler interface {
 	OnRestart(ctx *Ctx)
 }
 ```
-`OnRestart` also runs first time and not only after crash.
+`OnRestart` also runs the first time and not only after a crash.
 
 A factory builds your node. The simulator calls it again after every restart:
 
@@ -247,7 +43,7 @@ type Deps struct {
 
 ### Writes happen after your code returns
 
-Inside the nodes callback, reads are dones right away but writes does not.
+Inside the node's callback, reads are done right away but writes are not.
 ```
 Put -> Sync -> CancelTimer -> SetTimer -> Send
 ```
@@ -278,9 +74,310 @@ the point of `Sync`. It is also the most useful disk failure you can test.
 
 If you want to lose everything, crash with `wipeDisk` set to true.
 
+## Quick start
+
+Two nodes play ping pong. Each one sends a ball to the other every 50ms.
+
+You write two files. The **protocol** is your real code. It does not know the
+simulator exists. The **harness** connects your protocol with the simulator.
+
+### 1. The protocol
+
+The node says what it needs (`Transport`) and someone else provides it.
+
+No `sim` import in the protocol.
+
+```go
+package pingpong
+
+import (
+	"encoding/binary"
+	"io"
+)
+
+// What the node needs from the outside world.
+type Transport interface {
+	Send(to int, msg Ball)
+}
+
+// The message. The two methods are needed so the simulator can put messages in
+// its hash.
+type Ball struct {
+	Round  uint64
+	IsPing bool
+}
+
+func (b Ball) HashInto(w io.Writer) {
+	var buf [10]byte
+	buf[0] = 'b'
+	binary.LittleEndian.PutUint64(buf[1:9], b.Round)
+	if b.IsPing {
+		buf[9] = 1
+	}
+	w.Write(buf[:])
+}
+
+func (b Ball) Equal(other any) bool {
+	o, ok := other.(Ball)
+	return ok && b.Round == o.Round && b.IsPing == o.IsPing
+}
+
+// The node itself. No clock, no network, no goroutines.
+type Node struct {
+	Id    int
+	Peer  int
+	Round uint64
+	Pongs uint64
+
+	transport Transport
+}
+
+func New(id, peer int, t Transport) *Node {
+	return &Node{Id: id, Peer: peer, transport: t}
+}
+
+// OnTick is called every 50ms by whoever owns the timer.
+func (n *Node) OnTick() {
+	n.Round++
+	n.transport.Send(n.Peer, Ball{Round: n.Round, IsPing: true})
+}
+
+func (n *Node) OnPing(from int, b Ball) {
+	n.transport.Send(from, Ball{Round: b.Round, IsPing: false})
+}
+
+func (n *Node) OnPong(from int, b Ball) {
+	n.Pongs++
+}
+```
+
+Put every field that matters in `HashInto`. Put the same fields in `Equal`. If
+they do not match, the hash says two runs are different and the compare tool
+says they are the same, and you cannot trust either one.
+
+There are some example protocols in the repo, all with no `sim` import:
+`protocol/pingpong` and `protocol/maslave`.
+
+### 2. The harness
+
+This one imports `sim`. It does three jobs:
+
+* turns simulator callbacks into protocol calls
+* gives the protocol a `Transport` that sends through the simulator
+* builds the `Sim`
+
+`sim.Turn` holds the current `Ctx` while a callback runs. The transport reads
+it from there. If the protocol tries to send at the wrong time, `Turn` panics
+instead of using a dead `Ctx`.
+
+```go
+package pingpong
+
+import (
+	"fmt"
+
+	"github.com/alipourhabibi/detsim/protocol/pingpong"
+	"github.com/alipourhabibi/detsim/sim"
+)
+
+const Interval = sim.Duration(50)
+
+// Sends through the simulator, using whatever Ctx is active right now.
+type transport struct {
+	turn *sim.Turn
+}
+
+func (t *transport) Send(to int, msg pingpong.Ball) {
+	t.turn.Ctx().Send(to, msg)
+}
+
+// driver is what the simulator sees. It implements sim.Handler.
+type driver struct {
+	node *pingpong.Node
+	turn *sim.Turn
+}
+
+func (d *driver) OnRestart(ctx *sim.Ctx) {
+	d.turn.Enter(ctx)
+	defer d.turn.Leave()
+
+	ctx.SetTimer("tick", Interval)
+}
+
+func (d *driver) OnTimer(ctx *sim.Ctx, name string) {
+	d.turn.Enter(ctx)
+	defer d.turn.Leave()
+
+	d.node.OnTick()
+	ctx.SetTimer(name, Interval)
+}
+
+func (d *driver) OnMessage(ctx *sim.Ctx, from int, msg sim.Message) {
+	d.turn.Enter(ctx)
+	defer d.turn.Leave()
+
+	ball, ok := msg.(pingpong.Ball)
+	if !ok {
+		panic(fmt.Sprintf("harness: got %T, want pingpong.Ball", msg))
+	}
+
+	if ball.IsPing {
+		d.node.OnPing(from, ball)
+	} else {
+		d.node.OnPong(from, ball)
+	}
+}
+
+func (d *driver) Node() *pingpong.Node { return d.node }
+
+func Build(cfg sim.Config, a, b int) (*sim.Sim, map[int]*driver) {
+	drivers := map[int]*driver{}
+
+	factory := func(peer int) sim.NodeFactory {
+		return func(id int, deps sim.Deps) sim.Handler {
+			turn := &sim.Turn{}
+			d := &driver{
+				node: pingpong.New(id, peer, &transport{turn}),
+				turn: turn,
+			}
+			drivers[id] = d
+			return d
+		}
+	}
+
+	s := sim.New(cfg, []int{a, b}, factory(b), sim.WithFactory(b, factory(a)))
+	return s, drivers
+}
+```
+
+The factory runs again after every restart.
+
+### 3. Run it
+
+```go
+cfg := sim.Config{
+	Seed:       42,
+	MaxEvents:  1_000_000,
+	TraceLevel: sim.TraceHashEvents,
+	TraceKeep:  sim.KeepAll,
+	NetworkConfig: sim.NetworkConfig{
+		Delay:   sim.DelaySpec{Kind: sim.DelayUniform, Base: 1, Spread: 4},
+		LossPPM: 10_000, // 1 percent of messages are lost
+	},
+}
+
+s, drivers := Build(cfg, 0, 1)
+s.Start()
+```
+
+Run it twice with seed 42 and the hash is the same. Change the seed and you get
+a different run: different delays, different lost messages, a different order.
+
+## Injecting faults
+
+### ScheduleFault by hand
+
+```go
+s.ScheduleFault(1000, sim.NewCrashFault(1, false, 500))
+s.ScheduleFault(2000, sim.NewPartitionFault([]int{0}, []int{1}))
+s.ScheduleFault(3000, sim.NewHealFault(0))
+
+if err := s.RunUntil(5000); err != nil {
+	log.Fatal(err)
+}
+
+fmt.Printf("hash=%016x events=%d pongs=%d\n",
+	s.Hash(), s.EventCount(), drivers[0].Node().Pongs)
+```
+
+Node 1 dies at 1000 and comes back at 1500. The network splits at 2000 and is
+fixed at 3000. Some messages are lost the whole time.
+
+### Writing the faults yourself
+
+A `Plan` is just a list. You can write one by hand:
+
+```go
+plan := &sim.Plan{Faults: []sim.Scheduled{
+	{At: 1000, Fault: sim.NewCrashFault(1, false, 500)},
+	{At: 2000, Fault: sim.NewPartitionFault([]int{0}, []int{1, 2})},
+}}
+plan.Apply(s)
+```
+
+This is better than calling `ScheduleFault` one by one. The plan prints itself
+when a test fails, so you can see what happened, and `Shrink` can make it
+smaller.
+
+### Generate a Plan from a seed
+
+You do not have to write the fault list by hand. `GeneratePlan` writes one from
+a seed.
+
+```go
+plan := sim.GeneratePlan(sim.PlanConfig{
+	Until:   10_000,
+	MeanGap: 200,
+	MaxDown: 1, // keep enough nodes alive for a quorum
+	Weights: sim.DefaultWeights(),
+}, nodes, r)
+
+plan.Apply(s)
+```
+
+The whole plan is made before the run starts, not while it runs. This matters
+for shrinking. If faults were picked during the run, removing one would change
+all the ones after it, and you could not make a small plan from a big one.
+
+`PlanConfig` also has `MaxDowntime`, `MaxPause`, `WipeChance` and `MaxDropPPM`.
+They all have defaults.
+
+`Weights` sets the mix. The numbers are relative, not percent. `{Crash: 3,
+Heal: 1}` means three crashes for every heal.
+
+### Trying many seeds
+
+```go
+f := sim.Sweep(1, 10_000, gen, build, check)
+if f != nil {
+	f.Plan = sim.Shrink(f.Plan, func(p *sim.Plan) bool {
+		return check(build(f.Seed, p)) != nil
+	})
+	t.Fatal(f) // prints the seed and the small plan
+}
+```
+
+`Sweep` tries every seed from 1 to 10000 and stops at the first failure.
+
+`Shrink` then makes the plan smaller. It removes one fault, runs again, and
+keeps the removal if it still fails. A failure with 47 faults is too hard to
+read. The same failure with 3 faults is usually clear.
+
+`Shrink` must use the same seed as the failure. With a different seed you are
+only asking "does it fail at all", not "does this fault matter".
+
+## Trace
+
+You can use the `cmd/lockcheck` to test the traces yourself.
+
+It uses a buggy lock server and clients protocol which will fail via the sim and its harness.
+
+Run it:
+```
+go run ./cmd/lockcheck                    sweep 1..500, show the first failure
+go run ./cmd/lockcheck -seeds 1..10000    sweep further
+go run ./cmd/lockcheck -seed 1            replay one seed
+go run ./cmd/lockcheck -seed 1 -trace all show the whole trace, not just storage
+go run ./cmd/lockcheck -mermaid           print a diagram to paste in an issue
+go run ./cmd/lockcheck -out report.txt    write the report to a file
+```
+
+Read [READING-TRACES.md](READING-TRACES.md) to learn how to read the traces and
+find the bug in this/your protocol.
+
 ## Faults
 
-Is a value that can be run now or schedule for later.
+A fault is a value that can be run now or scheduled for later.
 
 ```go
 s.InjectFault(f)          // now
@@ -328,7 +425,8 @@ s.Heal(id)
 
 Rules are checked in order and **the last one that matches wins**. So an allow
 rule after a block rule makes a hole in the block. This is how you build a node
-that can reach both sides of a split(Bridge node). Those cases find the worst bugs.
+that can reach both sides of a split(Bridge node). Those cases find the worst
+bugs, the ones where two nodes both think they are the leader.
 
 The simulator checks twice if a message can pass: once when you send it, once
 when it arrives. A partition that appears while the message is flying still
@@ -419,11 +517,19 @@ hash. `KeepAll` keeps everything. A number `N` keeps the last `N`. Use
 `KeepAll` in tests. Use a number for very long runs, where old history costs
 too much memory.
 
-To put your own state in the hash, add this method to your node:
+To put your own state in the hash and show what it believes, add these methods
+to your driver, not to your protocol node:
 
 ```go
-func (n *Node) StateDigest(w io.Writer) { /* write your fields */ }
+func (d *driver) StateDigest(w io.Writer) { /* write your fields */ }
+func (d *driver) StateString() string { /* return what your node believes. */ }
 ```
+
+Both run between events, so they can only read plain fields. They cannot call
+`Send`, `Get`, `Put` or the timers: there is no `Ctx` there.
+
+The simulator writes a `state` line only when `StateString` changes, so you get
+the moments a node changed its mind, not one line per event.
 
 ### Comparing two runs
 
@@ -437,128 +543,7 @@ if a.Hash() != b.Hash() {
 
 Every dropped message has a reason in the trace: `stale epoch`, `timer
 superseded`, `partitioned in flight`, `node down`, `loss`. If a message
-disappears with no reason, you cannot read the run. So they all have one.
-
-## Writing a protocol
-
-Keep your protocol free of any `sim` import. Say what you need, and let a small
-adapter connect it.
-
-```go
-// protocol/myproto: no sim import here
-type Transport interface {
-	Send(to int, msg Msg)
-}
-
-type Node struct {
-	transport Transport
-}
-```
-
-The adapter joins the two. `sim.Turn` holds the `Ctx` while a callback runs, so
-if your protocol tries to send at the wrong time, it panics instead of using a
-dead `Ctx`:
-
-```go
-type driver struct {
-	node *myproto.Node
-	turn *sim.Turn
-}
-
-func (d *driver) OnTimer(ctx *sim.Ctx, name string) {
-	d.turn.Enter(ctx)
-	defer d.turn.Leave()
-	d.node.OnTick(name)
-}
-
-type transport struct {
-    turn *sim.Turn
-}
-
-func (t transport) Send(to int, msg myproto.Msg) {
-	t.turn.Ctx().Send(to, msg)
-}
-```
-
-Your messages need two methods:
-
-```go
-type Message interface {
-	HashInto(w io.Writer)
-	Equal(other any) bool
-}
-```
-
-Put every field that matters in `HashInto`. Put the same fields in `Equal`. If
-they do not match, the hash says two runs are different and the compare tool
-says they are the same, and you cannot trust either one.
-
-There are some example protocols in the repo, all with no `sim` import:
-`protocol/pingpong` and `protocol/maslave`.
-
-## Making faults for you
-
-You do not have to write the fault list by hand. `GeneratePlan` writes one from
-a seed.
-
-```go
-plan := sim.GeneratePlan(sim.PlanConfig{
-	Until:   10_000,
-	MeanGap: 200,
-	MaxDown: 1, // keep enough nodes alive for a quorum
-	Weights: sim.DefaultWeights(),
-}, nodes, r)
-
-s.Start()
-plan.Apply(s)
-```
-
-The whole plan is made before the run starts, not while it runs. This matters
-for shrinking. If faults were picked during the run, removing one would change
-all the ones after it, and you could not make a small plan from a big one.
-
-`PlanConfig` also has `MaxDowntime`, `MaxPause`, `WipeChance` and `MaxDropPPM`.
-They all have defaults.
-
-`Weights` sets the mix. The numbers are relative, not percent. `{Crash: 3,
-Heal: 1}` means three crashes for every heal.
-
-### Writing the faults yourself
-
-A `Plan` is just a list. You can write one by hand:
-
-```go
-plan := &sim.Plan{Faults: []sim.Scheduled{
-	{At: 1000, Fault: sim.NewCrashFault(1, false, 500)},
-	{At: 2000, Fault: sim.NewPartitionFault([]int{0}, []int{1, 2})},
-}}
-plan.Apply(s)
-```
-
-This is better than calling `ScheduleFault` one by one. The plan prints itself
-when a test fails, so you can see what happened, and `Shrink` can make it
-smaller.
-
-### Trying many seeds
-
-```go
-f := sim.Sweep(1, 10_000, gen, build, check)
-if f != nil {
-	f.Plan = sim.Shrink(f.Plan, func(p *sim.Plan) bool {
-		return check(build(f.Seed, p)) != nil
-	})
-	t.Fatal(f) // prints the seed and the small plan
-}
-```
-
-`Sweep` tries every seed from 1 to 10000 and stops at the first failure.
-
-`Shrink` then makes the plan smaller. It removes one fault, runs again, and
-keeps the removal if it still fails. A failure with 47 faults is too hard to
-read. The same failure with 3 faults is usually clear.
-
-`Shrink` must use the same seed as the failure. With a different seed you are
-only asking "does it fail at all", not "does this fault matter".
+disappears with no reason, you cannot read the run.
 
 ## Rules to follow
 
@@ -575,3 +560,23 @@ only asking "does it fail at all", not "does this fault matter".
      wait on timers, then push events into a queue. One goroutine takes them
      out and calls the node. The sim does the same thing without threads.
    * no map loops where the order changes what happens. Sort a slice instead.
+
+## Not built yet
+
+* **Invariants.** There is no way to say "this must always be true" and have it
+  checked after every event. You can only check at the end.
+* **Clock drift.** A node can have a fixed clock offset, but there is no option
+  to set it, and timers ignore it anyway.
+* **Buggify.** Marking dangerous lines in the protocol so the fault picker aims
+  at them. The stream number is reserved. Nothing uses it.
+
+## Folders
+
+```
+sim/                 the simulator
+protocol/pingpong/   example protocol, no sim import
+protocol/maslave/    example protocol, no sim import
+harness/pingpong/    connects pingpong to sim
+harness/maslave/     connects maslave to sim
+cmd/lockcheck/       sweeps seeds and prints traces
+```

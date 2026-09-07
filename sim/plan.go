@@ -183,6 +183,7 @@ func pick(r Rand, table []weightedKind, total int) faultKind {
 // live Sim: the generator maintains its own list of which nodes are down,
 // because we do not want it to depend on a running sim
 func GeneratePlan(cfg PlanConfig, nodes []int, r Rand) *Plan {
+	cfg.setDefaults()
 	cfg.validate()
 	if len(nodes) == 0 {
 		panic("sim: GeneratePlan with no nodes")
