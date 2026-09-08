@@ -12,7 +12,7 @@ It will produce this message and you see your protocol has bugs:
 shrunk 12 faults to 2
 
 seed 1
-mutual exclusion broken at t=1519: clients [2 3] are all inside the critical section, durable owner record says 3
+invariant broken at t=1519 #100: clients [2 3] are all inside the critical section, durable owner record says 3
 
 schedule (2 faults):
   t=275 node 0 paused; duration: 247

@@ -140,7 +140,15 @@ func (s *Server) Owner() int {
 	if !ok {
 		return NoHolder
 	}
-	return int(int64(binary.LittleEndian.Uint64(v)))
+	if len(v) != 8 {
+		panic(fmt.Sprintf("lockserver: owner record is %d bytes, want 8", len(v)))
+	}
+
+	id := int(int64(binary.LittleEndian.Uint64(v)))
+	if id < NoHolder {
+		panic(fmt.Sprintf("lockserver: owner record is %d, which is no client", id))
+	}
+	return id
 }
 
 func (s *Server) recordOwner(id int) {
@@ -232,7 +240,11 @@ func (c *Client) Start() {
 }
 
 func (c *Client) acquire() {
+	before := c.attempt
 	c.attempt++
+	if c.attempt <= before {
+		panic(fmt.Sprintf("lockserver: attempt went from %d to %d", before, c.attempt))
+	}
 	c.transport.Send(c.Server, Acquire{Attempt: c.attempt})
 	c.timers.SetTimer("retry", c.RetryMs)
 }

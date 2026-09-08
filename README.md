@@ -489,6 +489,84 @@ if leaders(s) != 1 {
 }
 ```
 
+## Checking
+
+The simulator gives you runs. You decide if a run was correct. Three ways.
+
+### Invariants
+
+Something that must be true at every moment. Two leaders. Two clients holding
+one lock. Register one before `Start` and the simulator runs it after every
+event, so a failure stops at the exact event that caused it.
+
+```go
+s.AddInvariant(func(s *sim.Sim) error {
+	if holders(s) > 1 {
+		return errors.New("two holders")
+	}
+	return nil
+})
+```
+
+An invariant must only read. If it sends or writes, it changes the run it is
+watching. It runs after every event, so keep it cheap.
+
+A crashed node has no handler, so `s.Handler(id)` gives nil. Every invariant has
+to decide what that means for it.
+
+### History
+
+What was asked for, and what came back.
+
+The trace looks inside the nodes. It knows one node wrote a value and then lost
+it in a crash. Nobody outside the system can know that. So a check on the trace
+can use facts that no real user has.
+
+The history only has requests and answers. That is what a real user sees, so a
+check on the history is a check a real user could do.
+
+Your harness records operations:
+
+```go
+s.History().Invoke(ctx.Now(), clientID, "acquire", attempt)
+// later
+s.History().Complete(ctx.Now(), clientID, attempt)
+```
+
+Every operation ends `ok` or `unknown`. Unknown means the client never got an
+answer. It is not a failure: the operation may have happened on the server and
+the client will never find out. A checker that calls it a failure reports bugs
+that are not real.
+
+The simulator marks a crashed client's waiting operations unknown at the crash,
+and closes the rest when a run ends.
+
+`Spans` turns a history into time windows so you can ask about overlaps:
+
+```go
+spans := s.History().Spans("acquire", "release", s.Now())
+if a, b, found := sim.Overlapping(spans); found {
+	// two clients at once
+}
+```
+
+### Liveness
+
+Something that must happen eventually. A leader is chosen. These cannot be
+proved wrong at any single moment, so they are not invariants. Instead remove
+the faults, wait, and check once at the end.
+
+```go
+if err := s.RunHealed(budget); err != nil {
+	return err
+}
+// now assert the good thing happened
+```
+
+The healing is required. Under a permanent partition no protocol can make
+progress, so asserting it would be asserting something false. The budget matters
+too: too short and a slow but correct recovery looks like a failure.
+
 ## Looking at a run
 
 ```go
@@ -560,15 +638,6 @@ disappears with no reason, you cannot read the run.
      wait on timers, then push events into a queue. One goroutine takes them
      out and calls the node. The sim does the same thing without threads.
    * no map loops where the order changes what happens. Sort a slice instead.
-
-## Not built yet
-
-* **Invariants.** There is no way to say "this must always be true" and have it
-  checked after every event. You can only check at the end.
-* **Clock drift.** A node can have a fixed clock offset, but there is no option
-  to set it, and timers ignore it anyway.
-* **Buggify.** Marking dangerous lines in the protocol so the fault picker aims
-  at them. The stream number is reserved. Nothing uses it.
 
 ## Folders
 

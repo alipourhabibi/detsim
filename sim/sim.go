@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 var ErrMaxEvents = errors.New("reached max events")
@@ -51,6 +52,10 @@ type Sim struct {
 	order []int           // id in order
 
 	lastRule RuleID
+
+	invariants []Invariant
+
+	history *History
 }
 
 type Option func(*Sim)
@@ -120,6 +125,7 @@ func New(cfg Config, nodes []int, factory NodeFactory, opts ...Option) *Sim {
 		nodes:   nodeMap,
 		order:   order,
 		index:   index,
+		history: newHistory(),
 	}
 
 	for _, o := range opts {
@@ -194,6 +200,7 @@ func (s *Sim) pushRestart(node int, at Time) uint64 {
 
 // Run modes.
 func (s *Sim) RunUntil(t Time) error {
+	defer s.history.close()
 	for {
 		next, ok := s.queue.Peek()
 		if !ok || next.At > t {
@@ -222,6 +229,7 @@ func (s *Sim) Step(n int) error {
 }
 
 func (s *Sim) RunUntilQuiescent() error {
+	defer s.history.close()
 	for {
 		ran, err := s.run()
 		if err != nil {
@@ -273,6 +281,10 @@ func (s *Sim) Nodes() []int {
 	return s.order
 }
 
+func (s *Sim) History() *History {
+	return s.history
+}
+
 func (s *Sim) Up(id int) bool {
 	return s.node(id).status == Healthy
 }
@@ -292,6 +304,11 @@ func (s *Sim) Heal(id RuleID) {
 
 // Handler returns a node's handler for assertions. nil while the node is
 // crashed. Read only: calling into it outside a callback has no Ctx.
+//
+// Every invariant has to decide what a nil handler means for it. "At most one
+// leader" skips crashed nodes, since a dead node has no opinion. "A majority is
+// reachable" counts them, since their absence is the point. There is no default
+// that is right for both.
 func (s *Sim) Handler(id int) Handler {
 	return s.node(id).handler
 }
@@ -399,6 +416,9 @@ func (s *Sim) run() (bool, error) {
 		evt.Payload.(Fault).Apply(s)
 		s.foldState()
 		s.reportStates() // a crash is exactly when beliefs change
+		if err := s.runInvariants(); err != nil {
+			return true, err
+		}
 		return true, nil
 	}
 
@@ -466,6 +486,9 @@ func (s *Sim) run() (bool, error) {
 	s.drain(evt.Target)
 	s.foldState()
 	s.reportStates()
+	if err := s.runInvariants(); err != nil {
+		return true, err
+	}
 	return true, nil
 }
 
@@ -603,4 +626,15 @@ func (s *Sim) States() map[int]string {
 		}
 	}
 	return out
+}
+
+func (s *Sim) StatesString() string {
+	var b strings.Builder
+	states := s.States()
+	for _, id := range s.order {
+		if st, ok := states[id]; ok {
+			fmt.Fprintf(&b, "  n%d: %s\n", id, st)
+		}
+	}
+	return b.String()
 }
