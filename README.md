@@ -491,7 +491,10 @@ if leaders(s) != 1 {
 
 ## Checking
 
-The simulator gives you runs. You decide if a run was correct. Three ways.
+The simulator gives you runs. Something else has to decide whether a run was
+correct. That something is called an oracle.
+
+There are three kinds, and each catches what the others miss.
 
 ### Invariants
 
