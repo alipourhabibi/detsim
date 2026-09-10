@@ -21,6 +21,11 @@ type Config struct {
 	NewStore      func(id int) Store
 }
 
+func (c Config) String() string {
+	return fmt.Sprintf("sim maxevents=%d trace=%v keep=%d %s",
+		c.MaxEvents, c.TraceLevel, c.TraceKeep, c.NetworkConfig)
+}
+
 func (s *Sim) requireDigester(id int) {
 	if s.cfg.TraceLevel < TraceHashEventsAndState {
 		return
@@ -56,6 +61,10 @@ type Sim struct {
 	invariants []Invariant
 
 	history *History
+
+	buggifyOn    map[string]bool // points on for this run, set by Plan.Apply
+	buggifySeen  map[string]int  // times the code reached this point
+	buggifyFired map[string]int  // visits that took the bad path
 }
 
 type Option func(*Sim)
@@ -126,6 +135,10 @@ func New(cfg Config, nodes []int, factory NodeFactory, opts ...Option) *Sim {
 		order:   order,
 		index:   index,
 		history: newHistory(),
+
+		buggifyOn:    map[string]bool{},
+		buggifySeen:  map[string]int{},
+		buggifyFired: map[string]int{},
 	}
 
 	for _, o := range opts {

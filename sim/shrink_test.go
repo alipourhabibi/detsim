@@ -98,6 +98,12 @@ func TestShrinkOnPassingPlanChangesNothing(t *testing.T) {
 	p := padded()
 	before := p.String()
 
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Shrink called on plan that does not fail did not panic")
+		}
+	}()
+
 	got := Shrink(p, never)
 
 	if got.String() != before {

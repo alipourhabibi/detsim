@@ -15,27 +15,40 @@ type Scheduled struct {
 
 // Plan is a complete fault schedule, drawn before the run starts.
 type Plan struct {
-	Faults []Scheduled
+	Faults  []Scheduled
+	Buggify []string // buggifies on for this run. Sorted.
 }
 
 func (p *Plan) Apply(s *Sim) {
+	s.setBuggify(p.Buggify)
 	for _, f := range p.Faults {
 		s.ScheduleFault(f.At, f.Fault)
 	}
 }
 
 func (p *Plan) Clone() *Plan {
-	return &Plan{Faults: slices.Clone(p.Faults)}
+	return &Plan{
+		Faults:  slices.Clone(p.Faults),
+		Buggify: slices.Clone(p.Buggify),
+	}
 }
 
 func (p *Plan) Len() int {
 	return len(p.Faults)
 }
 
+func (p *Plan) BuggifyLen() int {
+	return len(p.Buggify)
+}
+
 func (p *Plan) String() string {
 	var b strings.Builder
 	for _, f := range p.Faults {
 		fmt.Fprintf(&b, "t=%d %s\n", f.At, f.Fault)
+	}
+
+	for _, buggify := range p.Buggify {
+		fmt.Fprintf(&b, "buggify      %s\n", buggify)
 	}
 	return b.String()
 }
@@ -57,6 +70,21 @@ type PlanConfig struct {
 	MaxPause    Duration // longest a pause lasts
 	WipeChance  int64    // 1 in N crashes also wipes the disk; 0 means never
 	MaxDropPPM  uint32   // worst loss a drop-link fault can set, in PPM
+
+	// Buggify is every buggify point the protocol has.
+	// A name not in this list can never be turned on.
+	Buggify []string
+
+	// BuggifyPercent is roughly how many buggify are on.
+	// Zero means none, which is how you turn buggify off for a run.
+	BuggifyPercent int
+}
+
+func (c PlanConfig) String() string {
+	return fmt.Sprintf("plan until=%d gap=%d maxdown=%d downtime=%d pause=%d "+
+		"wipe=%d drop=%d %s",
+		c.Until, c.MeanGap, c.MaxDown, c.MaxDowntime, c.MaxPause,
+		c.WipeChance, c.MaxDropPPM, c.Weights)
 }
 
 func (c *PlanConfig) setDefaults() {
@@ -71,6 +99,10 @@ func (c *PlanConfig) setDefaults() {
 	}
 	if c.WipeChance == 0 {
 		c.WipeChance = 20
+	}
+
+	if c.MaxDown == 0 {
+		c.MaxDown = 1
 	}
 }
 
@@ -96,6 +128,9 @@ func (c PlanConfig) validate() {
 	if c.MaxDropPPM == 0 || c.MaxDropPPM > 1_000_000 {
 		panic(fmt.Sprintf("sim: MaxDropPPM must be 1..1000000, got %d", c.MaxDropPPM))
 	}
+	if c.BuggifyPercent < 0 || c.BuggifyPercent > 100 {
+		panic(fmt.Sprintf("sim: BuggifyPercent must be 0..100, got %d", c.BuggifyPercent))
+	}
 }
 
 // Weights biases the fault mix.
@@ -106,6 +141,12 @@ type Weights struct {
 	Isolate   int
 	DropLink  int
 	Heal      int
+}
+
+func (w Weights) String() string {
+	return fmt.Sprintf("weights crash=%d pause=%d partition=%d isolate=%d "+
+		"droplink=%d heal=%d",
+		w.Crash, w.Pause, w.Partition, w.Isolate, w.DropLink, w.Heal)
 }
 
 func DefaultWeights() Weights {
@@ -182,7 +223,7 @@ func pick(r Rand, table []weightedKind, total int) faultKind {
 // r must be a fresh stream derived from streamFault. Nothing here reads the
 // live Sim: the generator maintains its own list of which nodes are down,
 // because we do not want it to depend on a running sim
-func GeneratePlan(cfg PlanConfig, nodes []int, r Rand) *Plan {
+func GeneratePlan(cfg PlanConfig, nodes []int, seed uint64, r Rand) *Plan {
 	cfg.setDefaults()
 	cfg.validate()
 	if len(nodes) == 0 {
@@ -193,7 +234,10 @@ func GeneratePlan(cfg PlanConfig, nodes []int, r Rand) *Plan {
 	slices.Sort(sorted) // never trust the caller's ordering
 
 	table, total := cfg.Weights.table()
-	p := &Plan{}
+	p := &Plan{
+		Buggify: pickBuggify(
+			seed, cfg.Buggify, cfg.BuggifyPercent),
+	}
 
 	// list of nodes and when they come back
 	downUntil := map[int]Time{}

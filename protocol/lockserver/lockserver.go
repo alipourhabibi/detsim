@@ -13,9 +13,23 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/alipourhabibi/detsim/faults"
 )
 
 const NoHolder = -1
+
+const (
+	BuggifySkipSync    = "lockserver/skip-sync"
+	BuggifyDropRelease = "lockserver/drop-release"
+	BuggifyLongRetry   = "lockserver/long-retry"
+)
+
+var AllBuggify = []string{
+	BuggifySkipSync,
+	BuggifyDropRelease,
+	BuggifyLongRetry,
+}
 
 // Acquire asks for the lock. Fencing is by attempt number: the client bumps it
 // on every retry, so a late reply to an old attempt can be recognised and
@@ -125,10 +139,15 @@ type Server struct {
 
 	transport Transport
 	storage   Storage
+
+	faults faults.Injector
 }
 
-func NewServer(id int, t Transport, st Storage) *Server {
-	return &Server{Id: id, transport: t, storage: st, LastGranted: NoHolder}
+func NewServer(id int, t Transport, st Storage, f faults.Injector) *Server {
+	if f == nil {
+		f = faults.NoOp{}
+	}
+	return &Server{Id: id, transport: t, storage: st, LastGranted: NoHolder, faults: f}
 }
 
 func (s *Server) Start() {
@@ -158,26 +177,17 @@ func (s *Server) recordOwner(id int) {
 
 	s.LastGranted = id
 
-	// BUG: the write is never flushed. There is no s.storage.Sync() here.
+	// Put is write(2). The bytes are in memory, not on the disk. Sync is
+	// fsync(2) and it is what makes them safe.
 	//
-	// Put is write(2), not fsync(2). The record sits in the page cache and the
-	// server acknowledges the grant anyway. If the machine loses power inside
-	// that window, the record is gone but the client has already entered the
-	// critical section.
-	//
-	// On reboot the server reads an empty owner record, concludes the lock is
-	// free, and grants it to somebody else. Two clients now hold the same lock.
-	// If it guards a database they both write. If it elects a leader you have
-	// split brain.
-	//
-	// This is the classic acknowledge-before-durable bug. MongoDB shipped it
-	// for years. Kafka's acks=1 is the same trade made on purpose.
-	//
-	// The fix is one line: s.storage.Sync()
-	//
-	// It costs an fsync per grant, which caps throughput at a few thousand
-	// grants per second instead of hundreds of thousands. That is the price of
-	// the guarantee, and it is not optional for a lock service.
+	// This is the window. In a real machine it is about 50 microseconds out of
+	// a 5 second run, so a random crash lands in it about once in a hundred
+	// thousand tries. The mark below puts the fault in the window instead.
+	if faults.Enabled && s.faults.Buggify(BuggifySkipSync) {
+		return // acknowledge a write that is not on disk yet
+	}
+
+	s.storage.Sync()
 }
 
 func (s *Server) OnAcquire(from int, m Acquire) {
@@ -217,13 +227,18 @@ type Client struct {
 
 	transport Transport
 	timers    Timers
+
+	faults faults.Injector
 }
 
 func (c Client) Attempt() uint64 {
 	return c.attempt
 }
 
-func NewClient(id, server int, retryMs, holdMs int64, t Transport, tm Timers) *Client {
+func NewClient(id, server int, retryMs, holdMs int64, t Transport, tm Timers, f faults.Injector) *Client {
+	if f == nil {
+		f = faults.NoOp{}
+	}
 	return &Client{
 		Id:        id,
 		Server:    server,
@@ -231,6 +246,7 @@ func NewClient(id, server int, retryMs, holdMs int64, t Transport, tm Timers) *C
 		HoldMs:    holdMs,
 		transport: t,
 		timers:    tm,
+		faults:    f,
 	}
 }
 
@@ -246,7 +262,15 @@ func (c *Client) acquire() {
 		panic(fmt.Sprintf("lockserver: attempt went from %d to %d", before, c.attempt))
 	}
 	c.transport.Send(c.Server, Acquire{Attempt: c.attempt})
-	c.timers.SetTimer("retry", c.RetryMs)
+
+	// One slow client. It waits ten times longer before asking again, so its
+	// requests land in gaps the others never leave. Not a crash, not a partition,
+	// just a node out of step with the rest.
+	wait := c.RetryMs
+	if faults.Enabled && c.faults.Buggify(BuggifyLongRetry) {
+		wait = c.RetryMs * 10
+	}
+	c.timers.SetTimer("retry", wait)
 }
 
 func (c *Client) OnGranted(m Granted) {
@@ -270,6 +294,14 @@ func (c *Client) OnTimer(name string) {
 		// Lease expired. Leave the critical section, release, and queue up
 		// another attempt so the workload keeps running.
 		c.Holding = false
+
+		// A release with no reply. If it is lost, the lock is stuck until
+		// something else takes it back.
+		if faults.Enabled && c.faults.Buggify(BuggifyDropRelease) {
+			c.timers.SetTimer("retry", c.RetryMs)
+			return
+		}
+
 		c.transport.Send(c.Server, Release{})
 		c.timers.SetTimer("retry", c.RetryMs)
 	}

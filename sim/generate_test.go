@@ -18,8 +18,8 @@ func testPlanConfig() PlanConfig {
 
 var testNodes = []int{0, 1, 2, 3, 4}
 
-// countingRand wraps a stream and counts draws. Used to assert that the number
-// of draws is a function of the seed alone, never of state.
+// countingRand counts how many times a stream is drawn from. The number of
+// draws must depend on the seed only, never on what is happening in the plan.
 type countingRand struct {
 	inner Rand
 	draws int
@@ -30,11 +30,14 @@ func (c *countingRand) Int64N(n int64) int64 {
 	return c.inner.Int64N(n)
 }
 
-// --- the premise -------------------------------------------------------------
+// plan builds a plan for one seed, both streams from that seed.
+func plan(cfg PlanConfig, nodes []int, seed uint64) *Plan {
+	return GeneratePlan(cfg, nodes, seed, NewStream(seed, StreamFault))
+}
 
 func TestGeneratePlanIsDeterministic(t *testing.T) {
-	a := GeneratePlan(testPlanConfig(), testNodes, NewStream(42, StreamFault))
-	b := GeneratePlan(testPlanConfig(), testNodes, NewStream(42, StreamFault))
+	a := plan(testPlanConfig(), testNodes, 42)
+	b := plan(testPlanConfig(), testNodes, 42)
 
 	if a.Len() != b.Len() {
 		t.Fatalf("same seed produced %d and %d faults", a.Len(), b.Len())
@@ -45,8 +48,8 @@ func TestGeneratePlanIsDeterministic(t *testing.T) {
 }
 
 func TestGeneratePlanVariesBySeed(t *testing.T) {
-	a := GeneratePlan(testPlanConfig(), testNodes, NewStream(1, StreamFault))
-	b := GeneratePlan(testPlanConfig(), testNodes, NewStream(2, StreamFault))
+	a := plan(testPlanConfig(), testNodes, 1)
+	b := plan(testPlanConfig(), testNodes, 2)
 
 	if a.String() == b.String() {
 		t.Fatal("different seeds produced the same plan")
@@ -59,8 +62,8 @@ func TestGeneratePlanIgnoresNodeOrder(t *testing.T) {
 	sorted := []int{0, 1, 2, 3, 4}
 	jumbled := []int{3, 0, 4, 1, 2}
 
-	a := GeneratePlan(testPlanConfig(), sorted, NewStream(7, StreamFault))
-	b := GeneratePlan(testPlanConfig(), jumbled, NewStream(7, StreamFault))
+	a := plan(testPlanConfig(), sorted, 7)
+	b := plan(testPlanConfig(), jumbled, 7)
 
 	if a.String() != b.String() {
 		t.Fatal("node ordering changed the plan")
@@ -70,32 +73,39 @@ func TestGeneratePlanIgnoresNodeOrder(t *testing.T) {
 	}
 }
 
-// --- the draw-count invariant ------------------------------------------------
-
-// Every branch draws before it guards, so the draw count depends on the seed
-// alone. If a guard ever moves ahead of a draw, the plan stops being a pure
-// function of the seed and the corpus becomes worthless.
-//
-// MaxDown 0 and MaxDown 5 take completely different paths through the append
-// logic and must still consume the stream identically.
+// MaxDown 1 and MaxDown 5 take different paths through the append logic and
+// must still use the stream the same way.
 func TestGeneratePlanDrawCountIsStateIndependent(t *testing.T) {
 	count := func(maxDown int) int {
 		cfg := testPlanConfig()
 		cfg.MaxDown = maxDown
 		r := &countingRand{inner: NewStream(99, StreamFault)}
-		GeneratePlan(cfg, testNodes, r)
+		GeneratePlan(cfg, testNodes, 99, r)
 		return r.draws
 	}
 
-	none, all := count(0), count(len(testNodes))
-	if none != all {
-		t.Fatalf("MaxDown=0 made %d draws, MaxDown=%d made %d; a guard is "+
-			"running before a draw", none, len(testNodes), all)
+	few, many := count(1), count(len(testNodes))
+	if few != many {
+		t.Fatalf("MaxDown=1 made %d draws, MaxDown=%d made %d; a guard is "+
+			"running before a draw", few, len(testNodes), many)
 	}
 }
 
-// Same property from the other side: excluding nodes must not change how many
-// times pickNode draws.
+// MaxDown of zero would mean no crash is ever generated: the guard reads
+// len(downUntil) >= 0, which is always true. Every draw still happens, so the
+// plan looks fine and the crashes are simply missing. setDefaults turns it into
+// 1 so that cannot happen by accident.
+func TestMaxDownDefaultsToOne(t *testing.T) {
+	cfg := PlanConfig{Until: 1000, MeanGap: 100, Weights: DefaultWeights()}
+	cfg.setDefaults()
+
+	if cfg.MaxDown < 1 {
+		t.Fatalf("MaxDown defaulted to %d, want at least 1", cfg.MaxDown)
+	}
+}
+
+// Same idea from the other side: excluding nodes must not change how many times
+// pickNode draws.
 func TestPickNodeDrawsOnceRegardless(t *testing.T) {
 	for _, exclude := range []map[int]bool{
 		{},
@@ -111,25 +121,23 @@ func TestPickNodeDrawsOnceRegardless(t *testing.T) {
 	}
 }
 
-func TestExpGapAlwaysDrawsFourTimes(t *testing.T) {
+func TestNextGapAlwaysDrawsFourTimes(t *testing.T) {
 	r := &countingRand{inner: NewStream(1, StreamFault)}
 	nextGap(r, 100)
 	if r.draws != 4 {
-		t.Fatalf("expGap made %d draws, want exactly 4", r.draws)
+		t.Fatalf("nextGap made %d draws, want exactly 4", r.draws)
 	}
 }
 
-// --- constraints -------------------------------------------------------------
-
-// MaxDown must hold across the whole plan, not just at the moment each crash is
-// drawn. Walk the schedule and track overlapping downtime.
+// MaxDown must hold across the whole plan, not only at the moment each crash is
+// drawn. Walk the schedule and count overlapping downtime.
 func TestGeneratePlanRespectsMaxDown(t *testing.T) {
 	const maxDown = 2
 	cfg := testPlanConfig()
 	cfg.MaxDown = maxDown
 
 	for seed := uint64(1); seed <= 50; seed++ {
-		p := GeneratePlan(cfg, testNodes, NewStream(seed, StreamFault))
+		p := plan(cfg, testNodes, seed)
 
 		downUntil := map[int]Time{}
 		for _, f := range p.Faults {
@@ -151,13 +159,14 @@ func TestGeneratePlanRespectsMaxDown(t *testing.T) {
 	}
 }
 
-// A zero weight excludes a kind entirely rather than giving it a small chance.
+// A weight of zero leaves the kind out completely. It does not give it a small
+// chance.
 func TestZeroWeightKindNeverGenerated(t *testing.T) {
 	cfg := testPlanConfig()
 	cfg.Weights = Weights{Crash: 0, Pause: 1, Partition: 1, Heal: 1}
 
 	for seed := uint64(1); seed <= 50; seed++ {
-		p := GeneratePlan(cfg, testNodes, NewStream(seed, StreamFault))
+		p := plan(cfg, testNodes, seed)
 		for _, f := range p.Faults {
 			if _, isCrash := f.Fault.(crashFault); isCrash {
 				t.Fatalf("seed %d generated a crash with Crash weight 0", seed)
@@ -174,11 +183,11 @@ func TestAllZeroWeightsPanics(t *testing.T) {
 	}()
 	cfg := testPlanConfig()
 	cfg.Weights = Weights{}
-	GeneratePlan(cfg, testNodes, NewStream(1, StreamFault))
+	plan(cfg, testNodes, 1)
 }
 
 func TestGeneratePlanIsSortedByTime(t *testing.T) {
-	p := GeneratePlan(testPlanConfig(), testNodes, NewStream(5, StreamFault))
+	p := plan(testPlanConfig(), testNodes, 5)
 	for i := 1; i < p.Len(); i++ {
 		if p.Faults[i].At < p.Faults[i-1].At {
 			t.Fatalf("fault %d at t=%d follows one at t=%d",
@@ -189,7 +198,7 @@ func TestGeneratePlanIsSortedByTime(t *testing.T) {
 
 func TestGeneratePlanStaysWithinUntil(t *testing.T) {
 	cfg := testPlanConfig()
-	p := GeneratePlan(cfg, testNodes, NewStream(5, StreamFault))
+	p := plan(cfg, testNodes, 5)
 	for _, f := range p.Faults {
 		if f.At >= cfg.Until {
 			t.Fatalf("fault at t=%d, Until is %d", f.At, cfg.Until)
@@ -197,10 +206,8 @@ func TestGeneratePlanStaysWithinUntil(t *testing.T) {
 	}
 }
 
-// --- selection helpers -------------------------------------------------------
-
-// A partition with an empty side is not a partition. Both groups must be
-// non-empty for every draw.
+// A partition with an empty side is not a partition. Both groups must have at
+// least one node, every draw.
 func TestSplitNodesBothSidesNonEmpty(t *testing.T) {
 	r := NewStream(1, StreamFault)
 	for range 1000 {
@@ -294,13 +301,8 @@ func TestWeightTableSkipsZeroEntries(t *testing.T) {
 	}
 }
 
-// --- replay ------------------------------------------------------------------
-
-// The test that catches the subtle mistake, and the only one that will: if
-// generation ever reads live sim state, the plan stops being replayable and
-// nothing else here fails.
 func TestPlanReplayIsStable(t *testing.T) {
-	plan := GeneratePlan(testPlanConfig(), testNodes, NewStream(31, StreamFault))
+	p := plan(testPlanConfig(), testNodes, 31)
 
 	run := func() uint64 {
 		s := New(testConfig(31), testNodes,
@@ -308,7 +310,7 @@ func TestPlanReplayIsStable(t *testing.T) {
 				return &pingOnTimer{peer: (id + 1) % len(testNodes)}
 			})
 		s.Start()
-		plan.Apply(s)
+		p.Apply(s)
 		if err := s.RunUntil(10_000); err != nil {
 			t.Fatal(err)
 		}

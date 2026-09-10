@@ -7,14 +7,28 @@ import "slices"
 // stillFails MUST use the same seed as the original failure. Otherwise it tests
 // whether the failure reproduces at all, not whether a given fault mattered.
 func Shrink(p *Plan, stillFails func(*Plan) bool) *Plan {
+	if !stillFails(p) {
+		panic("sim: Shrink called on a plan that does not fail")
+	}
+
 	best := p
-	for i := best.Len() - 1; i >= 0; i-- {
+
+	for i := len(best.Faults) - 1; i >= 0; i-- {
 		candidate := best.Clone()
 		candidate.Faults = slices.Delete(candidate.Faults, i, i+1)
 		if stillFails(candidate) {
 			best = candidate
 		}
 	}
+
+	for i := len(best.Buggify) - 1; i >= 0; i-- {
+		candidate := best.Clone()
+		candidate.Buggify = slices.Delete(candidate.Buggify, i, i+1)
+		if stillFails(candidate) {
+			best = candidate
+		}
+	}
+
 	return best
 }
 

@@ -9,6 +9,15 @@ import (
 	"github.com/alipourhabibi/detsim/sim"
 )
 
+// injector reaches through the Turn to the Ctx that is live right now.
+type injector struct {
+	turn *sim.Turn
+}
+
+func (i injector) Buggify(site string) bool {
+	return i.turn.Ctx().Buggify(site)
+}
+
 const (
 	opAcquire = "acquire"
 	opRelease = "release"
@@ -227,7 +236,7 @@ func Build(cfg sim.Config, clientCount int, retryMs, holdMs int64) *Cluster {
 	serverFactory := func(id int, deps sim.Deps) sim.Handler {
 		turn := &sim.Turn{}
 		d := &ServerDriver{
-			node: lockserver.NewServer(id, &transport{turn}, &storage{turn}),
+			node: lockserver.NewServer(id, &transport{turn}, &storage{turn}, &injector{turn}),
 			turn: turn,
 		}
 		c.server = d
@@ -238,7 +247,7 @@ func Build(cfg sim.Config, clientCount int, retryMs, holdMs int64) *Cluster {
 		turn := &sim.Turn{}
 		d := &ClientDriver{
 			node: lockserver.NewClient(id, serverID, retryMs, holdMs,
-				&transport{turn}, &timers{turn}),
+				&transport{turn}, &timers{turn}, &injector{turn}),
 			turn:    turn,
 			history: c.Sim.History(),
 		}

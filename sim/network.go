@@ -36,6 +36,13 @@ type DelaySpec struct {
 	Spread Duration  // width of the draw, so samples land in [Base, Base+Spread)
 }
 
+func (d DelaySpec) String() string {
+	if d.Kind == DelayConstant {
+		return fmt.Sprintf("delay=constant:%d", d.Base)
+	}
+	return fmt.Sprintf("delay=uniform:%d:%d", d.Base, d.Spread)
+}
+
 func (s DelaySpec) build() Delay {
 	if s.Base < 0 {
 		panic(fmt.Sprintf("sim: DelaySpec.Base %d is negative", s.Base))
@@ -114,6 +121,11 @@ type NetworkConfig struct {
 	LossPPM        uint32
 	DuplicationPPM uint32
 	IsReordering   bool // default is FIFO
+}
+
+func (n NetworkConfig) String() string {
+	return fmt.Sprintf("net %s loss=%d dup=%d reorder=%t",
+		n.Delay, n.LossPPM, n.DuplicationPPM, n.IsReordering)
 }
 
 // Creates a new network struct with all links to default values

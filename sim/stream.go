@@ -22,7 +22,6 @@ const (
 	StreamLoss
 	StreamDup
 	StreamFault
-	StreamBuggify
 	StreamWorkload
 	// next concern stream goes here
 )
