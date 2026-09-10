@@ -457,6 +457,101 @@ An empty `NetworkConfig` gives a perfect network: no delay, no loss, in order.
 Start there. If your protocol breaks on a perfect network, the bug is in your
 protocol.
 
+## Buggify
+
+Some bugs live in a very small moment. Your server writes to disk, then sends a
+reply. In a real machine the gap between those two lines is about 50
+microseconds. A run is 5 seconds. So a random crash almost never lands there.
+
+You do not wait for luck. You mark the gap:
+
+```go
+s.storage.Put(keyOwner, buf[:])
+
+if faults.Enabled && s.faults.Buggify("lockserver/skip-sync") {
+    return // reply without syncing, and see what happens
+}
+
+s.storage.Sync()
+```
+
+Your protocol says where the danger is and what the bad thing would be. The
+simulator only says yes or no.
+
+### It costs nothing in production
+
+`faults.Enabled` is a constant. In a normal build it is false, so the compiler
+removes the whole line. Not a call, not a comparison.
+
+```
+go build ./...                 no fault injection in the program
+go test -tags simfaults ./...  the lines are put back in
+```
+
+The price: the program you test is not the program you ship. Keep the bodies of
+those `if` blocks small, and run your tests both ways.
+
+### Your protocol still does not import sim
+
+It takes an interface, the same way it takes `Transport`:
+
+```go
+type Injector interface {
+    Buggify(name string) bool
+}
+```
+
+Production passes `faults.NoOp`, which is always false. The harness passes a
+small piece that asks the simulator.
+
+### On for the whole run
+
+A name is one point. Before a run starts, about one point in four is turned on.
+A point that is on fires every time the code reaches it. A point that is off
+never fires.
+
+It does not decide again each time. A node that does the bad thing once and
+then behaves is not much of a test. A node that keeps doing it is.
+
+Each point is decided from its own name and the seed. So one point cannot
+change another. Add a new point and nothing else moves: not the faults, not the
+other points. Renaming a point does change it.
+
+### The points are in the Plan, so they shrink
+
+```
+shrunk 19 faults to 2, 1 buggify to 1
+
+schedule (2 faults):
+t=212    node 3 crashed
+t=773    node 0 crashed
+buggify  lockserver/skip-sync
+```
+
+`Shrink` takes away points as well as faults, so a failure tells you which one
+mattered.
+
+### Check your points are reached
+
+```
+buggify:
+    lockserver/skip-sync           seen=6      fired=6
+  . lockserver/drop-release        seen=3      fired=0
+  ! lockserver/long-retry          seen=0      fired=0
+```
+
+`seen` counts every time the code reached the point, on or not. `fired` counts
+the times it took the bad path.
+
+A `!` means the code never ran that line. That point is doing nothing for you.
+
+### Where to put them
+
+* after a write to disk, before the reply
+* between two writes that should be one
+* in a retry or backoff path
+* when a node becomes leader
+
 ## Running
 
 ```go
@@ -641,14 +736,3 @@ disappears with no reason, you cannot read the run.
      wait on timers, then push events into a queue. One goroutine takes them
      out and calls the node. The sim does the same thing without threads.
    * no map loops where the order changes what happens. Sort a slice instead.
-
-## Folders
-
-```
-sim/                 the simulator
-protocol/pingpong/   example protocol, no sim import
-protocol/maslave/    example protocol, no sim import
-harness/pingpong/    connects pingpong to sim
-harness/maslave/     connects maslave to sim
-cmd/lockcheck/       sweeps seeds and prints traces
-```

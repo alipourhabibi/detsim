@@ -3,22 +3,25 @@
 I will use the `cmd/lockcheck` for this.
 
 ```
-go run ./cmd/lockcheck/ -seed 1
+go run -tags simfaults ./cmd/lockcheck/ -seed 1
 ```
 
 It will produce this message and you see your protocol has bugs:
 
 ```
-shrunk 12 faults to 2
+shrunk 12 faults to 2, 1 buggify to 1
 
 seed 1
-invariant broken at t=1519 #100: clients [2 3] are all inside the critical section, durable owner record says 3
+invariant: invariant broken at t=1519 #100: clients [2 3] are all inside the critical section, durable owner record says 3
 
 schedule (2 faults):
   t=275 node 0 paused; duration: 247
   t=1416 node 0 crashed; wipe disk: false
+  buggify lockserver/skip-sync
 
-durability trace:
+history: 39 ops, 5 ok, 34 unknown, 0 open
+
+storage trace:
   a write with no sync after it, then a rollback, is the bug.
 
 t=2      #2    n0   durableWrite    lock.owner
@@ -40,7 +43,7 @@ That is the short version. `-trace storage` is the default and shows only the
 disk lines. The six steps below use the full trace:
 
 ```
-go run ./cmd/lockcheck -seed 1 -trace all -out report.txt
+go run -tags simfaults ./cmd/lockcheck -seed 1 -trace all -out report.txt
 ```
 
 Every `grep` on this page runs on that file.
@@ -93,6 +96,7 @@ This is useful. A small number at a late time means something waited a long time
 | `restart` | the node came back |
 | `pause` / `resume` | the node was frozen, then woke up |
 | `timerSet` / `timerCancelled` | a timer was started or stopped |
+| `buggify` | the code took a bad path on purpose |
 | `state` | a node changed what it believes |
 
 The two most useful are `state` and `rollback`. Start with those.
@@ -102,11 +106,15 @@ The two most useful are `state` and `rollback`. Start with those.
 ### Step 1. Read the failure line
 
 ```
-mutual exclusion broken at t=1519: clients [2 3] are all inside the
+invariant: invariant broken at t=1519 #100: clients [2 3] are all inside the
 critical section, durable owner record says 3
 ```
 
 This tells you **which nodes** (2 and 3) and **when** (1519).
+
+The first word says which check found it. `invariant` runs after every event.
+`history` runs at the end and looks at what the clients saw. `liveness` runs
+after the faults are removed. Each one has its own section further down.
 
 Everything after this goes backwards from that point.
 
@@ -121,7 +129,7 @@ normal lines, so this is much easier to read.
 
 ### Step 3. Find when the nodes went wrong
 
-```go
+```
 grep " state " report.txt | grep -E "n[123]"
 ```
 
@@ -145,7 +153,7 @@ inside. That is the bug.
 
 ### Step 4. Find what caused it
 
-```go
+```
 grep "t=1246 \|t=1519 " report.txt
 ```
 
@@ -185,7 +193,7 @@ forgot.
 
 ### Step 6. Find what is missing
 
-```go
+```
 grep "rollback\|crash" report.txt
 ```
 
@@ -196,7 +204,7 @@ t=1416   #8   n0   crash
 t=1416   #8   n0   rollback   1 unsynced keys lost
 ```
 
-```go
+```
 grep "#84" report.txt
 ```
 
@@ -255,12 +263,96 @@ Same six steps. Different missing line.
 
 ---
 
+## Buggify lines
+
+Your protocol marks places where something bad could happen. When the simulator
+takes one of those paths it writes a line:
+
+```
+t=1238   #84   n0   durableWrite  lock.owner
+t=1238   #84   n0   buggify       lockserver/skip-sync
+t=1238   #84   n0   sent          Granted#10 -> 2
+```
+
+That line says the sync was skipped on purpose. Without it you would not know
+whether the missing sync was your bug or this run making it happen.
+
+The schedule above the trace lists which points were on:
+
+```
+schedule (2 faults):
+  t=212 node 3 crashed
+  buggify lockserver/skip-sync
+```
+
+To see how often each point was reached and how often it fired:
+
+```
+buggify:
+    lockserver/skip-sync           seen=6      fired=6
+  . lockserver/drop-release        seen=3      fired=0
+  ! lockserver/long-retry          seen=0      fired=0
+```
+
+`seen` counts every time the code reached the point. `fired` counts the times it
+took the bad path. A `!` means the code never ran that line, so that point is
+doing nothing for you.
+
+Buggify needs the build tag. Without `-tags simfaults` no point ever fires and
+you will see none of these lines.
+
+---
+
+## The history
+
+Above the trace there is one line about the history:
+
+```
+history: 39 ops, 5 ok, 34 unknown, 0 open
+```
+
+The history is what the clients saw. Not what happened inside the nodes. The
+trace knows the server lost a write. No real client can know that. So a check
+on the history is a check a real user could do.
+
+To see it:
+
+```
+go run -tags simfaults ./cmd/lockcheck -seed 1 -trace history
+```
+
+```
+op1    c1 acquire    key=1    0..8 ok
+op2    c2 acquire    key=1    0..? unknown
+op11   c2 acquire    key=5    400..412 ok
+op20   c2 release    key=5    712..? unknown
+```
+
+Each line is one request. The two numbers are when it was sent and when the
+answer came back.
+
+There are three endings:
+
+* `ok` means the answer came back.
+* `unknown` means it never came back. This is not a failure. The server may have
+  done it. The client will never find out.
+* `open` means it was still waiting when the run ended.
+
+Most lines are `unknown`, and that is normal here. Every retry gives up on the
+attempt before it, and a release gets no reply at all.
+
+Reading it: pair each `ok` acquire with the next release from the same client.
+Two acquires with no release between them is the bug, and you can see it without
+opening the trace.
+
+---
+
 ## What to run
 
 Start small. Most bugs need only a few lines.
 
 ```
-go run ./cmd/lockcheck -seed 1 -trace storage
+go run -tags simfaults ./cmd/lockcheck -seed 1 -trace storage
 ```
 
 This shows only writes, syncs, rollbacks, crashes and restarts. For a disk bug
@@ -269,7 +361,7 @@ this is often the whole answer, in about six lines.
 If that is not enough:
 
 ```
-go run ./cmd/lockcheck -seed 1 -trace all -out report.txt
+go run -tags simfaults ./cmd/lockcheck -seed 1 -trace all -out report.txt
 ```
 
 Then use `grep` on the file:
@@ -279,7 +371,17 @@ grep " state " report.txt        what the nodes believed
 grep " n0 " report.txt           everything one node did
 grep "#84" report.txt            one event and what it caused
 grep "rollback\|crash" report.txt   the dangerous moments
+grep "buggify" report.txt        the bad paths taken on purpose
 ```
+
+To run one check at a time:
+
+```
+go run -tags simfaults ./cmd/lockcheck -check liveness
+```
+
+The checks stop at the first failure. If you have a known bug in one of them,
+the later ones never run, and this is how you look at them anyway.
 
 ---
 
@@ -291,10 +393,12 @@ Above the trace you see the faults that were used:
 schedule (2 faults):
   t=275 node 0 paused; duration: 247
   t=1416 node 0 crashed; wipe disk: false
+  buggify lockserver/skip-sync
 ```
 
-This is after shrinking. The tool started with 12 faults, removed them one at a
-time, and kept only the ones needed to still break the rule.
+This is after shrinking. The tool started with 12 faults and 1 buggify point,
+removed them one at a time, and kept only the ones needed to still break the
+rule.
 
 Two faults is short enough to think about. Twelve is not. This is why shrinking
 matters.
@@ -302,12 +406,12 @@ matters.
 To see the full list before shrinking:
 
 ```
-go run ./cmd/lockcheck -seed 1 -no-shrink
+go run -tags simfaults ./cmd/lockcheck -seed 1 -no-shrink
 ```
 
 ---
 
-## Three faults, three different problems
+## Four kinds of problem
 
 Do not mix these up when reading a trace.
 
@@ -346,6 +450,15 @@ t=800   n0   dropped   deliver 1->0   (partitioned in flight)
 
 A crashed node does nothing. A partitioned node does everything, alone. That is
 why a partitioned node can still think it is the leader.
+
+**Buggify.** Nothing is done to the node. The node takes a bad path inside its
+own code, one that your protocol marked.
+
+```
+t=1238   n0   buggify   lockserver/skip-sync
+```
+
+The first three are things done to a node from outside. This one is inside.
 
 ---
 
