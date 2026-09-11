@@ -2,55 +2,6 @@ package sim
 
 import "testing"
 
-type putThenSend struct {
-	peer int
-}
-
-func (n *putThenSend) OnRestart(ctx *Ctx) {
-	ctx.SetTimer("go", 10)
-}
-
-func (n *putThenSend) OnTimer(ctx *Ctx, _ string) {
-	ctx.Send(n.peer, testMsg{N: 1}) // written FIRST, must apply SECOND
-	ctx.Put("vote", []byte("3"))
-	ctx.Sync()
-}
-
-func (n *putThenSend) OnMessage(*Ctx, int, Message) {}
-
-// The load-bearing half of the drain order: a node cannot reply to a vote it
-// has not yet persisted. The send is written first here and must still apply
-// after the write.
-func TestPutAppliesBeforeSend(t *testing.T) {
-	s := New(testConfig(1), []int{0, 1},
-		func(id int, _ Deps) Handler {
-			if id == 0 {
-				return &putThenSend{peer: 1}
-			}
-			return NoOpHandler{}
-		})
-	s.Start()
-	if err := s.RunUntil(100); err != nil {
-		t.Fatal(err)
-	}
-
-	var wroteAt, sentAt = -1, -1
-	for i, e := range s.Trace().Entries() {
-		switch {
-		case e.Kind == EnDurableWrite && wroteAt < 0:
-			wroteAt = i
-		case e.Kind == EnSent && sentAt < 0:
-			sentAt = i
-		}
-	}
-	if wroteAt < 0 || sentAt < 0 {
-		t.Fatalf("missing entries: write=%d send=%d", wroteAt, sentAt)
-	}
-	if wroteAt > sentAt {
-		t.Fatal("send applied before the durable write; drain order is wrong")
-	}
-}
-
 type cancelThenSet struct {
 	fires int
 }
@@ -62,13 +13,11 @@ func (n *cancelThenSet) OnRestart(ctx *Ctx) {
 func (n *cancelThenSet) OnTimer(ctx *Ctx, name string) {
 	n.fires++
 	ctx.CancelTimer(name)
-	ctx.SetTimer(name, 10) // cancel drains first, so this survives
+	ctx.SetTimer(name, 10) // the set comes after, so it wins
 }
 
 func (n *cancelThenSet) OnMessage(*Ctx, int, Message) {}
 
-// EfCancelTimer drains before EfSetTimer, so a callback that cancels and
-// re-arms the same timer ends with it armed.
 func TestCancelThenSetLeavesTimerArmed(t *testing.T) {
 	made := map[int]*cancelThenSet{}
 	s := New(testConfig(1), []int{0},
@@ -81,6 +30,98 @@ func TestCancelThenSetLeavesTimerArmed(t *testing.T) {
 	if made[0].fires < 5 {
 		t.Fatalf("timer fired %d times in 100ms at 10ms intervals; the re-arm "+
 			"was cancelled", made[0].fires)
+	}
+}
+
+func TestCancelAfterSetInTheSameTurn(t *testing.T) {
+	fired := 0
+
+	s := New(testConfig(1), []int{0},
+		func(id int, deps Deps) Handler {
+			return effectHandler{
+				onRestart: func(c *Ctx) {
+					c.SetTimer("t", 10)
+					c.CancelTimer("t")
+				},
+				onTimer: func(c *Ctx, name string) { fired++ },
+			}
+		})
+	s.Start()
+
+	if err := s.RunUntil(100); err != nil {
+		t.Fatal(err)
+	}
+
+	if fired != 0 {
+		t.Fatalf("the handler cancelled the timer after setting it, but it fired %d time(s)", fired)
+	}
+}
+
+type orderedEffects struct {
+	peer      int
+	sendFirst bool
+}
+
+func (n *orderedEffects) OnRestart(ctx *Ctx) {
+	ctx.SetTimer("go", 10)
+}
+
+func (n *orderedEffects) OnTimer(ctx *Ctx, _ string) {
+	if n.sendFirst {
+		ctx.Send(n.peer, testMsg{N: 1})
+	}
+	ctx.Put("vote", []byte("3"))
+	ctx.Sync()
+	if !n.sendFirst {
+		ctx.Send(n.peer, testMsg{N: 1})
+	}
+}
+
+func (n *orderedEffects) OnMessage(*Ctx, int, Message) {}
+
+func TestEffectsApplyInEmissionOrder(t *testing.T) {
+	cases := []struct {
+		name      string
+		sendFirst bool
+	}{
+		{"send then write", true},
+		{"write then send", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(testConfig(1), []int{0, 1},
+				func(id int, _ Deps) Handler {
+					if id == 0 {
+						return &orderedEffects{peer: 1, sendFirst: tc.sendFirst}
+					}
+					return NoOpHandler{}
+				})
+			s.Start()
+			if err := s.RunUntil(100); err != nil {
+				t.Fatal(err)
+			}
+
+			wroteAt, sentAt := -1, -1
+			for i, e := range s.Trace().Entries() {
+				switch {
+				case e.Kind == EnDurableWrite && wroteAt < 0:
+					wroteAt = i
+				case e.Kind == EnSent && sentAt < 0:
+					sentAt = i
+				}
+			}
+			if wroteAt < 0 || sentAt < 0 {
+				t.Fatalf("missing entries: write=%d send=%d", wroteAt, sentAt)
+			}
+
+			if tc.sendFirst && sentAt > wroteAt {
+				t.Fatal("the callback sent first; the send was applied after the write")
+			}
+			if !tc.sendFirst && wroteAt > sentAt {
+				t.Fatal("the callback wrote first; the write was applied after the send")
+			}
+		})
 	}
 }
 

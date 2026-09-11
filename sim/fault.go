@@ -29,11 +29,6 @@ func (h *hasher) u64(v uint64) {
 	h.w.Write(h.buf[:])
 }
 
-func (h *hasher) u32(v uint32) {
-	binary.LittleEndian.PutUint32(h.buf[:], v)
-	h.w.Write(h.buf[:])
-}
-
 func (h *hasher) i64(v int64) {
 	h.u64(uint64(v))
 }

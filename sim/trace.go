@@ -243,24 +243,39 @@ func (t *Trace) Sum() uint64 {
 	return t.h.Sum64()
 }
 
+// Len is how many entries Entries returns. It is not how many were recorded:
+// a ring drops the old ones, and keep == 0 drops all of them. Use Count for
+// the total.
 func (t *Trace) Len() int {
-	if t.keep > 0 && t.count >= uint64(t.keep) {
-		return t.keep
+	switch t.keep {
+	case 0:
+		return 0
+	case KeepAll:
+		return len(t.entries)
+	default:
+		return min(int(t.count), t.keep)
 	}
-	return int(t.count)
+}
+
+// Count is every entry ever recorded, including the ones a ring dropped.
+func (t *Trace) Count() uint64 {
+	return t.count
 }
 
 func (t *Trace) Entries() []Entry {
-	if t.keep <= 0 {
+	switch {
+	case t.keep == 0:
+		return nil
+	case t.keep == KeepAll:
 		return t.entries
-	}
-	if t.count < uint64(t.keep) { // ring not full yet
+	case t.count < uint64(t.keep): // ring not full yet
 		return t.entries[:t.count]
+	default: // ring is full: rotate it back into order
+		out := make([]Entry, 0, t.keep)
+		out = append(out, t.entries[t.head:]...)
+		out = append(out, t.entries[:t.head]...)
+		return out
 	}
-	out := make([]Entry, 0, t.keep)
-	out = append(out, t.entries[t.head:]...)
-	out = append(out, t.entries[:t.head]...)
-	return out
 }
 
 func (t *Trace) Dump(w io.Writer) error {

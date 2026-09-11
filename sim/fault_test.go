@@ -1,6 +1,9 @@
 package sim
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestFaultHashAgreesWithEqual(t *testing.T) {
 	faults := []Fault{
@@ -32,5 +35,32 @@ func TestFaultHashAgreesWithEqual(t *testing.T) {
 					i, a, j, b, sameHash, a.Equal(b))
 			}
 		}
+	}
+}
+
+func TestHasherFieldWidths(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(*hasher)
+		want  int
+	}{
+		{"u64", func(h *hasher) { h.u64(1) }, 8},
+		{"i64", func(h *hasher) { h.i64(-1) }, 8},
+		{"node", func(h *hasher) { h.node(3) }, 8},
+		{"dur", func(h *hasher) { h.dur(5) }, 8},
+		{"rule", func(h *hasher) { h.rule(2) }, 8},
+		{"bool", func(h *hasher) { h.bool(true) }, 1},
+		{"nodes", func(h *hasher) { h.nodes([]int{1, 2}) }, 8 + 8 + 8}, // length prefix
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var b bytes.Buffer
+			h := hashTag(&b, 'X')
+			tc.write(&h)
+			if got := b.Len() - 1; got != tc.want { // minus the tag
+				t.Fatalf("%s wrote %d bytes, want %d", tc.name, got, tc.want)
+			}
+		})
 	}
 }

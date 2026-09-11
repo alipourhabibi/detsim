@@ -37,7 +37,7 @@ func Shrink(p *Plan, stillFails func(*Plan) bool) *Plan {
 func ShrinkToFixpoint(p *Plan, stillFails func(*Plan) bool) *Plan {
 	for {
 		next := Shrink(p, stillFails)
-		if next.Len() == p.Len() {
+		if next.Len() == p.Len() && next.BuggifyLen() == p.BuggifyLen() {
 			return next
 		}
 		p = next

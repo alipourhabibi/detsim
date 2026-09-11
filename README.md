@@ -43,20 +43,22 @@ type Deps struct {
 
 ### Writes happen after your code returns
 
-Inside the node's callback, reads are done right away but writes are not.
-```
-Put -> Sync -> CancelTimer -> SetTimer -> Send
-```
+Inside the node's callback, reads are done right away but writes are not. The
+simulator collects them and carries them out when your callback returns, in the
+order you wrote them.
 
-Writes go to disk before messages go out. So a node can never answer a vote
-that it has not saved yet. You cannot write that bug, even by accident.
+```go
+ctx.Put("term", encode(5))
+ctx.Sync()               // makes the line above durable, and nothing after it
+ctx.Send(peer, vote)     // goes out over a log that is on disk
+```
 
 Two things follow from this:
 
 * A `Ctx` only works inside the callback that got it. If you save it and use it
   later, it panics.
-* `Sync` covers every `Put` in the same callback, even ones written after it in
-  the code. If you want a write that is not synced, do it in another callback.
+* `Sync` covers the `Put` calls before it and nothing after it. A `Put` written
+  after the `Sync` is not durable, and a crash throws it away.
 
 ### Disk survives a crash, memory does not
 
@@ -636,8 +638,21 @@ answer. It is not a failure: the operation may have happened on the server and
 the client will never find out. A checker that calls it a failure reports bugs
 that are not real.
 
-The simulator marks a crashed client's waiting operations unknown at the crash,
-and closes the rest when a run ends.
+The simulator marks a crashed client's waiting operations unknown at the crash.
+The client's memory is gone, so it can never match a reply again.
+
+An operation that is still waiting also reads `unknown`, because at that moment
+the client has no answer and a checker may assume nothing else. But it is not
+finished. A run has phases, and a run mode is the end of a phase, not the end of
+the run:
+
+```go
+s.RunUntil(until)     // the faulty phase
+s.RunHealed(budget)   // heal, then run some more
+```
+
+An answer that arrives in the second phase still counts as `ok`. Reading the
+history does not end it.
 
 `Spans` turns a history into time windows so you can ask about overlaps:
 
@@ -693,6 +708,10 @@ hash. `KeepAll` keeps everything. A number `N` keeps the last `N`. Use
 `KeepAll` in tests. Use a number for very long runs, where old history costs
 too much memory.
 
+`Len()` is how many entries you can read back: `0` when `TraceKeep` is `0`, and
+at most `N` for a ring. `Count()` is how many were recorded in total, including
+the ones a ring threw away.
+
 To put your own state in the hash and show what it believes, add these methods
 to your driver, not to your protocol node:
 
@@ -725,8 +744,8 @@ disappears with no reason, you cannot read the run.
 
 1. Events run in `(At, Seq)` order and nothing else changes that.
 2. A `Ctx` only works inside its own callback.
-3. Writes happen after your callback, in the order `Put, Sync, CancelTimer,
-   SetTimer, Send`. `Sync` covers the whole callback.
+3. Writes happen after your callback, in the order you wrote them. `Sync`
+   covers the writes before it and nothing after it.
 4. `HashInto` and `Equal` must use the same fields.
 5. In protocol code:
    * ask for the clock and for random numbers through an interface. The sim

@@ -93,7 +93,7 @@ func (f healFault) Apply(s *Sim) {
 
 func (f healFault) HashInto(w io.Writer) {
 	h := hashTag(w, 'H')
-	h.rule(f.ID) // currently dropped entirely
+	h.rule(f.ID)
 }
 
 func (f healFault) Equal(other any) bool {
@@ -125,11 +125,11 @@ func (f lossLinkFault) HashInto(w io.Writer) {
 	h := hashTag(w, 'D')
 	h.node(f.From)
 	h.node(f.To)
-	h.u32(f.DropPPM)
+	h.u64(uint64(f.DropPPM))
 }
 
 func (f lossLinkFault) String() string {
-	return fmt.Sprintf("drop %d->%d to %d%%", f.From, f.To, f.DropPPM)
+	return fmt.Sprintf("drop %d->%d %.1f%%", f.From, f.To, float64(f.DropPPM)/10000)
 }
 
 func (f lossLinkFault) Equal(other any) bool {
@@ -154,11 +154,11 @@ func (f duplicateLinkFault) HashInto(w io.Writer) {
 	h := hashTag(w, 'U')
 	h.node(f.From)
 	h.node(f.To)
-	h.u32(f.DuplicatePPM)
+	h.u64(uint64(f.DuplicatePPM))
 }
 
 func (f duplicateLinkFault) String() string {
-	return fmt.Sprintf("duplicate %d->%d to %d%%", f.From, f.To, f.DuplicatePPM)
+	return fmt.Sprintf("duplicate %d->%d %.1f%%", f.From, f.To, float64(f.DuplicatePPM)/10000)
 }
 
 func (f duplicateLinkFault) Equal(other any) bool {

@@ -77,3 +77,29 @@ func wantPanic(t *testing.T, what string) func() {
 		}
 	}
 }
+
+// effectHandler runs whatever you give it. For tests about what a callback
+// emits, where the protocol does not matter.
+type effectHandler struct {
+	onRestart func(*Ctx)
+	onTimer   func(*Ctx, string)
+	onMessage func(*Ctx, int, Message)
+}
+
+func (h effectHandler) OnRestart(c *Ctx) {
+	if h.onRestart != nil {
+		h.onRestart(c)
+	}
+}
+
+func (h effectHandler) OnTimer(c *Ctx, name string) {
+	if h.onTimer != nil {
+		h.onTimer(c, name)
+	}
+}
+
+func (h effectHandler) OnMessage(c *Ctx, from int, m Message) {
+	if h.onMessage != nil {
+		h.onMessage(c, from, m)
+	}
+}

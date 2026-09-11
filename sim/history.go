@@ -170,20 +170,19 @@ func (h *History) abandonClient(client int) {
 	}
 }
 
-// close marks everything still waiting as Unknown. The sim calls it when a run
-// ends, so a forgotten call cannot leave operations sitting at Open and quietly
-// change what every check sees.
-func (h *History) close() {
-	for k, i := range h.open {
-		h.ops[i].Outcome = Unknown
-		delete(h.open, k)
-	}
-}
-
 // Ops returns the operations in the order they were started.
+//
+// An operation still waiting is reported Unknown: at this moment the client
+// has no answer, and that is all a checker may assume. The history itself is
+// not changed, so an answer that arrives later still counts.
 func (h *History) Ops() []Op {
 	out := make([]Op, len(h.ops))
 	copy(out, h.ops)
+	for i := range out {
+		if out[i].Outcome == Open {
+			out[i].Outcome = Unknown
+		}
+	}
 	return out
 }
 

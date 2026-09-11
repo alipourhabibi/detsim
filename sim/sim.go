@@ -213,7 +213,6 @@ func (s *Sim) pushRestart(node int, at Time) uint64 {
 
 // Run modes.
 func (s *Sim) RunUntil(t Time) error {
-	defer s.history.close()
 	for {
 		next, ok := s.queue.Peek()
 		if !ok || next.At > t {
@@ -242,7 +241,6 @@ func (s *Sim) Step(n int) error {
 }
 
 func (s *Sim) RunUntilQuiescent() error {
-	defer s.history.close()
 	for {
 		ran, err := s.run()
 		if err != nil {
@@ -312,7 +310,7 @@ func (s *Sim) Partition(a, b []int) RuleID {
 // Heal removes one rule. Heal(0) removes everything.
 func (s *Sim) Heal(id RuleID) {
 	s.network.heal(id)
-	s.trace.Note(EnHealed, s.now, -1, fmt.Sprintf("heal rule=%d", id), s.seq)
+	s.trace.Note(EnHealed, s.now, -1, fmt.Sprintf("heal rule=%d", id), s.current)
 }
 
 // Handler returns a node's handler for assertions. nil while the node is
@@ -505,16 +503,17 @@ func (s *Sim) run() (bool, error) {
 	return true, nil
 }
 
-var drainOrder = [...]EffectKind{EfPut, EfSync, EfCancelTimer, EfSetTimer, EfSend}
-
-// drain is where the actual things happen in the node
+// drain applies the turn's effects in the order the handler emitted them.
+//
+// Nothing in apply may emit further effects: the loop bounds are fixed at
+// entry, so an append here would be silently dropped.
 func (s *Sim) drain(node int) {
-	for _, kind := range drainOrder {
-		for i := range s.effects.buf {
-			if s.effects.buf[i].Kind == kind {
-				s.apply(node, &s.effects.buf[i])
-			}
-		}
+	n := len(s.effects.buf)
+	for i := range s.effects.buf {
+		s.apply(node, &s.effects.buf[i])
+	}
+	if len(s.effects.buf) != n {
+		panic("sim: effects appended during drain")
 	}
 }
 

@@ -43,8 +43,8 @@ func (c *Ctx) Get(key string) ([]byte, bool) {
 
 // --- effects: recorded now, applied when the turn ends ---
 //
-// Send does not send; Save does not write. The sim carries them out after the
-// callback.
+// Send does not send; Put does not write. The sim carries them out after the
+// callback returns, in the order they were recorded.
 
 func (c *Ctx) Send(to int, msg Message) {
 	c.check()

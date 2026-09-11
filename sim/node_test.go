@@ -116,34 +116,6 @@ func TestWipeDiskLosesEverything(t *testing.T) {
 	}
 }
 
-type syncOrderNode struct{}
-
-func (syncOrderNode) OnRestart(ctx *Ctx) {
-	ctx.Put("first", []byte("a"))
-	ctx.Sync()
-	ctx.Put("second", []byte("b")) // textually after the Sync
-}
-
-func (syncOrderNode) OnMessage(*Ctx, int, Message) {}
-func (syncOrderNode) OnTimer(*Ctx, string)         {}
-
-// NOTE right now the put in the same callback after the sync will also applies
-func TestSyncCoversWholeCallback(t *testing.T) {
-	s := New(testConfig(1), []int{0, 1},
-		func(int, Deps) Handler { return syncOrderNode{} })
-	s.Start()
-
-	s.InjectFault(NewCrashFault(0, false, 0))
-	if err := s.RunUntil(10); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, ok := s.Get(0, "second"); !ok {
-		t.Fatal("write after Sync in the same callback was rolled back; " +
-			"drain order no longer applies Sync after every Put")
-	}
-}
-
 func TestPauseResumesAutomatically(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1}, noop)
 	s.Start()
@@ -497,5 +469,34 @@ func TestDifferentSeedsDiverge(t *testing.T) {
 
 	if run(1) == run(2) {
 		t.Fatal("different seeds produced the same hash")
+	}
+}
+
+func TestSyncDoesNotCoverLaterWrites(t *testing.T) {
+	s := New(testConfig(1), []int{0},
+		func(id int, deps Deps) Handler {
+			return effectHandler{
+				onRestart: func(c *Ctx) {
+					c.Put("k", []byte("durable"))
+					c.Sync()
+					c.Put("k", []byte("not durable"))
+				},
+			}
+		})
+	s.Start()
+
+	// Crash without a wipe: everything written since the last Sync is lost.
+	s.InjectFault(NewCrashFault(0, false, 0)) // stays down
+	if err := s.RunUntilQuiescent(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := s.Get(0, "k")
+	if !ok {
+		t.Fatal("the synced write did not survive the crash")
+	}
+	if string(got) != "durable" {
+		t.Fatalf("after the crash k is %q; the write that came after the Sync "+
+			"was never durable and should have rolled back", got)
 	}
 }

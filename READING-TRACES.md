@@ -3,39 +3,48 @@
 I will use the `cmd/lockcheck` for this.
 
 ```
-go run -tags simfaults ./cmd/lockcheck/ -seed 1
+go run -tags simfaults ./cmd/lockcheck/ -seed 7
 ```
 
 It will produce this message and you see your protocol has bugs:
 
 ```
-shrunk 12 faults to 2, 1 buggify to 1
+shrunk 19 faults to 2, 1 buggify to 1
 
-seed 1
-invariant: invariant broken at t=1519 #100: clients [2 3] are all inside the critical section, durable owner record says 3
+seed 7
+invariant: invariant broken at t=997 #61: clients [2 3] are all inside the critical section, durable owner record says 3
+  n0: granted=3
+  n1: waiting attempt=7
+  n2: HOLDING attempt=8
+  n3: HOLDING attempt=5
+
 
 schedule (2 faults):
-  t=275 node 0 paused; duration: 247
-  t=1416 node 0 crashed; wipe disk: false
-  buggify lockserver/skip-sync
+t=212    node 3 crashed; wipe disk: false
+t=773    node 0 crashed; wipe disk: false
+buggify  lockserver/skip-sync
 
-history: 39 ops, 5 ok, 34 unknown, 0 open
+buggify:
+  . lockserver/drop-release        seen=2      fired=0
+  . lockserver/long-retry          seen=23     fired=0
+    lockserver/skip-sync           seen=6      fired=6
+
+history: 25 ops, 4 ok, 20 unknown, 1 open
 
 storage trace:
   a write with no sync after it, then a rollback, is the bug.
 
-t=2      #2    n0   durableWrite    lock.owner
-t=522    #40   n0   durableWrite    lock.owner
-t=522    #41   n0   durableWrite    lock.owner
-t=522    #45   n0   durableWrite    lock.owner
-t=838    #63   n0   durableWrite    lock.owner
-t=904    #65   n0   durableWrite    lock.owner
-t=1214   #82   n0   durableWrite    lock.owner
-t=1238   #84   n0   durableWrite    lock.owner
-t=1416   #8    n0   crash
-t=1416   #8    n0   rollback        1 unsynced keys lost
-t=1507   #95   n0   restart
-t=1514   #99   n0   durableWrite    lock.owner
+t=7      #1    n0   durableWrite    lock.owner
+t=212    #7    n3   crash
+t=269    #19   n3   restart
+t=314    #24   n0   durableWrite    lock.owner
+t=374    #26   n0   durableWrite    lock.owner
+t=682    #42   n0   durableWrite    lock.owner
+t=708    #44   n0   durableWrite    lock.owner
+t=773    #8    n0   crash
+t=773    #8    n0   rollback        1 unsynced keys lost
+t=918    #50   n0   restart
+t=988    #59   n0   durableWrite    lock.owner
 exit status 1
 ```
 
@@ -43,22 +52,22 @@ That is the short version. `-trace storage` is the default and shows only the
 disk lines. The six steps below use the full trace:
 
 ```
-go run -tags simfaults ./cmd/lockcheck -seed 1 -trace all -out report.txt
+go run -tags simfaults ./cmd/lockcheck -seed 7 -trace all -out report.txt
 ```
 
 Every `grep` on this page runs on that file.
 
 ## The line Format
 ```
-t=1238   #84   n0   durableWrite    lock.owner
+t=708    #44   n0   durableWrite    lock.owner
 ```
 
 It has 5 parts:
 
 | Part | Meaning |
 |---|---|
-| t=1238 | the time |
-| #84 | the event number |
+| t=708 | the time |
+| #44 | the event number |
 | n0 | the node |
 | durableWrite | what happened |
 | lock.owner | extra details |
@@ -68,18 +77,18 @@ It does two things:
 1. Decides The order: When two events happen at the same time, the smaller number runs first.
 2. It groups lines:
 ```
-t=1238   #84   n0   event           deliver 2->0 Acquire#10
-t=1238   #84   n0   durableWrite    lock.owner
-t=1238   #84   n0   state           granted=-1 -> granted=2
+t=708    #44   n0   event           deliver 2->0 ep=0 Acquire#8
+t=708    #44   n0   durableWrite    lock.owner
+t=708    #44   n0   state           granted=-1 -> granted=2
 ```
 The numbers are not in order in the file. You will see this:
 ```
-t=1514   #99   n0   deliver 3->0
-t=1516   #97   n0   deliver 1->0
+t=206    #17   n0   event           deliver 3->0 ep=0 Acquire#3
+t=207    #15   n0   event           deliver 2->0 ep=0 Acquire#3
 ```
-#99 comes before #97. That is correct. The number is given when the event is made, not when it runs. Node 1 sent its message first, but the message was slower on the network, so it arrived later.
+#17 comes before #15. That is correct. The number is given when the event is made, not when it runs. Node 2 sent its message first, but the message was slower on the network, so it arrived later.
 
-This is useful. A small number at a late time means something waited a long time. In the example, #8 runs at t=1416. It was made at the very start and waited 1416 units.
+This is useful. A small number at a late time means something waited a long time. In the example, #8 runs at t=773. It was made at the very start and waited 773 units.
 
 ## The kinds of line
 
@@ -106,11 +115,18 @@ The two most useful are `state` and `rollback`. Start with those.
 ### Step 1. Read the failure line
 
 ```
-invariant: invariant broken at t=1519 #100: clients [2 3] are all inside the
+invariant: invariant broken at t=997 #61: clients [2 3] are all inside the
 critical section, durable owner record says 3
+  n0: granted=3
+  n1: waiting attempt=7
+  n2: HOLDING attempt=8
+  n3: HOLDING attempt=5
 ```
 
-This tells you **which nodes** (2 and 3) and **when** (1519).
+This tells you **which nodes** (2 and 3) and **when** (997). The lines under it
+are what every node believed at that instant, which is often enough to guess the
+shape of the bug before you open the trace: node 0 says the lock is node 3's,
+and node 2 thinks it is holding it anyway.
 
 The first word says which check found it. `invariant` runs after every event.
 `history` runs at the end and looks at what the clients saw. `liveness` runs
@@ -130,38 +146,37 @@ normal lines, so this is much easier to read.
 ### Step 3. Find when the nodes went wrong
 
 ```
-grep " state " report.txt | grep -E "n[123]"
+grep " state " report.txt | grep -E "n[123]" | grep HOLDING
 ```
 
-Keep only the clients:
+Keep only the clients, and only the moments they went in or out:
 
 ```
-t=8      n1   waiting attempt=1  -> HOLDING attempt=1
-t=530    n2   waiting attempt=6  -> HOLDING attempt=6
-t=830    n2   HOLDING attempt=6  -> waiting attempt=6
-t=909    n3   waiting attempt=10 -> HOLDING attempt=10
-t=1209   n3   HOLDING attempt=10 -> waiting attempt=10
-t=1246   n2   waiting attempt=10 -> HOLDING attempt=10
-t=1519   n3   waiting attempt=13 -> HOLDING attempt=13
+t=9      #9    n1   state           waiting attempt=1 -> HOLDING attempt=1
+t=309    #10   n1   state           HOLDING attempt=1 -> waiting attempt=1
+t=380    #28   n3   state           waiting attempt=2 -> HOLDING attempt=2
+t=680    #29   n3   state           HOLDING attempt=2 -> waiting attempt=2
+t=713    #46   n2   state           waiting attempt=8 -> HOLDING attempt=8
+t=997    #61   n3   state           waiting attempt=5 -> HOLDING attempt=5
 ```
 
 Read down the list. Every `HOLDING` has a `-> waiting` after it, except the last
 two.
 
-Client 2 goes in at 1246 and never comes out. Client 3 goes in at 1519. Both are
+Client 2 goes in at 713 and never comes out. Client 3 goes in at 997. Both are
 inside. That is the bug.
 
 ### Step 4. Find what caused it
 
 ```
-grep "t=1246 \|t=1519 " report.txt
+grep "t=713 \|t=997 " report.txt
 ```
 
-Look at the same time, one line above:
+Look at the same time, at the `event` line:
 
 ```
-t=1246   #85   n2   event   deliver 0->2 Granted#10
-t=1519   #100  n3   event   deliver 0->3 Granted#13
+t=713    #46   n2   event   deliver 0->2 ep=0 Granted#8
+t=997    #61   n3   event   deliver 0->3 ep=2 Granted#5
 ```
 
 Both clients were told "you have the lock" by node 0.
@@ -175,20 +190,24 @@ grep " n0 " report.txt | grep state
 ```
 
 ```
-t=1238   granted=-1 -> granted=2
-t=1416   granted=2  -> down
-t=1507   down       -> granted=-1
-t=1514   granted=-1 -> granted=3
+t=7      granted=-1 -> granted=1
+t=314    granted=1  -> granted=-1
+t=374    granted=-1 -> granted=3
+t=682    granted=3  -> granted=-1
+t=708    granted=-1 -> granted=2
+t=773    granted=2  -> down
+t=918    down       -> granted=-1
+t=988    granted=-1 -> granted=3
 ```
 
-Read it as a story:
+Read the end of it as a story:
 
-* 1238: I gave the lock to client 2.
-* 1416: I died.
-* 1507: I woke up. Nobody has the lock.
-* 1514: I gave the lock to client 3.
+* 708: I gave the lock to client 2.
+* 773: I died.
+* 918: I woke up. Nobody has the lock.
+* 988: I gave the lock to client 3.
 
-Between 1416 and 1507 the server forgot. Nobody gave the lock back. It just
+Between 773 and 918 the server forgot. Nobody gave the lock back. It just
 forgot.
 
 ### Step 6. Find what is missing
@@ -200,19 +219,24 @@ grep "rollback\|crash" report.txt
 Look at the crash:
 
 ```
-t=1416   #8   n0   crash
-t=1416   #8   n0   rollback   1 unsynced keys lost
+t=773    #8    n-   event      fault node 0 crashed; wipe disk: false
+t=773    #8    n0   crash
+t=773    #8    n0   rollback   1 unsynced keys lost
+```
+
+One key was lost. The storage trace at the top says which write it was: the last
+`durableWrite` before the crash, at t=708, event #44. Go there:
+
+```
+grep "#44" report.txt
 ```
 
 ```
-grep "#84" report.txt
-```
-
-One key was lost. Now go back to where that key was written:
-
-```
-t=1238   #84   n0   durableWrite   lock.owner
-t=1238   #84   n0   sent           Granted#10 -> 2
+t=708    #44   n0   event           deliver 2->0 ep=0 Acquire#8
+t=708    #44   n0   buggify         lockserver/skip-sync
+t=708    #44   n0   durableWrite    lock.owner
+t=708    #44   n0   sent            Granted#8 -> 2
+t=708    #44   n0   state           granted=-1 -> granted=2
 ```
 
 The server wrote to disk. Then it told the client "you have the lock".
@@ -223,7 +247,14 @@ That is the bug. `durableWrite` only puts the data in memory. `sync` is what
 puts it on the real disk. The server said yes before the data was safe. Then it
 lost power, and the data was gone.
 
-The fix is one line: call `Sync()` after the write.
+The `buggify` line says why the sync is missing in this run: the simulator took
+a path your protocol marked.
+s
+```
+t=708    #44   n0   durableWrite    lock.owner
+t=708    #44   n0   sent            Granted#8 -> 2
+t=708    #44   n0   sync
+```
 
 ---
 
@@ -236,6 +267,7 @@ You find it by looking at a place where something should be and is not:
 | Missing line | What you see instead |
 |---|---|
 | `sync` after `durableWrite` | a `rollback` later throws the write away |
+| `sync` before the `sent` | the sync is there, but under the reply, not above it |
 | a timeout on the server | one node holds something forever |
 | a check on an old message | a slow reply is accepted after it stopped being true |
 
@@ -244,7 +276,7 @@ should be between them.
 
 ### The same steps on a different bug
 
-The third row of that table looks like this in a trace. No crash, no rollback,
+The fourth row of that table looks like this in a trace. No crash, no rollback,
 nothing lost:
 
 ```
@@ -269,37 +301,48 @@ Your protocol marks places where something bad could happen. When the simulator
 takes one of those paths it writes a line:
 
 ```
-t=1238   #84   n0   durableWrite  lock.owner
-t=1238   #84   n0   buggify       lockserver/skip-sync
-t=1238   #84   n0   sent          Granted#10 -> 2
+t=708    #44   n0   buggify         lockserver/skip-sync
+t=708    #44   n0   durableWrite    lock.owner
+t=708    #44   n0   sent            Granted#8 -> 2
 ```
 
 That line says the sync was skipped on purpose. Without it you would not know
 whether the missing sync was your bug or this run making it happen.
 
+The buggify line comes first because it is written while your callback runs.
+The writes and sends are effects, and effects happen after your callback
+returns. So in one event you read the callback's own lines first, then its
+effects, in the order your code asked for them.
+
 The schedule above the trace lists which points were on:
 
 ```
 schedule (2 faults):
-  t=212 node 3 crashed
-  buggify lockserver/skip-sync
+t=212    node 3 crashed; wipe disk: false
+t=773    node 0 crashed; wipe disk: false
+buggify  lockserver/skip-sync
 ```
 
 To see how often each point was reached and how often it fired:
 
 ```
 buggify:
+  . lockserver/drop-release        seen=2      fired=0
+  . lockserver/long-retry          seen=23     fired=0
     lockserver/skip-sync           seen=6      fired=6
-  . lockserver/drop-release        seen=3      fired=0
-  ! lockserver/long-retry          seen=0      fired=0
 ```
 
 `seen` counts every time the code reached the point. `fired` counts the times it
-took the bad path. A `!` means the code never ran that line, so that point is
-doing nothing for you.
+took the bad path. A `.` means the point was off for this run. A `!` would mean
+the code never ran that line at all, so that point is doing nothing for you.
+
+In this run `skip-sync` fired all six times it was reached, which is why there
+is not one `sync` line anywhere in the trace. A point that is on fires every
+time.
 
 Buggify needs the build tag. Without `-tags simfaults` no point ever fires and
-you will see none of these lines.
+you will see none of these lines. That is also how you check the other side: run
+it without the tag and the syncs come back.
 
 ---
 
@@ -308,7 +351,7 @@ you will see none of these lines.
 Above the trace there is one line about the history:
 
 ```
-history: 39 ops, 5 ok, 34 unknown, 0 open
+history: 25 ops, 4 ok, 20 unknown, 1 open
 ```
 
 The history is what the clients saw. Not what happened inside the nodes. The
@@ -318,14 +361,16 @@ on the history is a check a real user could do.
 To see it:
 
 ```
-go run -tags simfaults ./cmd/lockcheck -seed 1 -trace history
+go run -tags simfaults ./cmd/lockcheck -seed 7 -trace history
 ```
 
 ```
-op1    c1 acquire    key=1    0..8 ok
+op1    c1 acquire    key=1    0..9 ok
 op2    c2 acquire    key=1    0..? unknown
-op11   c2 acquire    key=5    400..412 ok
-op20   c2 release    key=5    712..? unknown
+op11   c3 acquire    key=2    369..380 ok
+op19   c2 acquire    key=8    700..713 ok
+op24   c1 acquire    key=7    909..? open
+op25   c3 acquire    key=5    980..997 ok
 ```
 
 Each line is one request. The two numbers are when it was sent and when the
@@ -336,14 +381,19 @@ There are three endings:
 * `ok` means the answer came back.
 * `unknown` means it never came back. This is not a failure. The server may have
   done it. The client will never find out.
-* `open` means it was still waiting when the run ended.
+* `open` means it was still waiting at that moment. It is not finished. A run
+  has phases, and the faulty phase ending is not the run ending, so an answer
+  that arrives in a later phase still counts as `ok`. A checker reading the
+  history sees `unknown` for these, because right now the client has no answer
+  and that is all a checker may assume.
 
 Most lines are `unknown`, and that is normal here. Every retry gives up on the
 attempt before it, and a release gets no reply at all.
 
 Reading it: pair each `ok` acquire with the next release from the same client.
-Two acquires with no release between them is the bug, and you can see it without
-opening the trace.
+`op19` gives client 2 the lock at 713 and no release follows. `op25` gives it to
+client 3 at 997. Two acquires with no release between them is the bug, and you
+can see it without opening the trace.
 
 ---
 
@@ -352,16 +402,16 @@ opening the trace.
 Start small. Most bugs need only a few lines.
 
 ```
-go run -tags simfaults ./cmd/lockcheck -seed 1 -trace storage
+go run -tags simfaults ./cmd/lockcheck -seed 7 -trace storage
 ```
 
 This shows only writes, syncs, rollbacks, crashes and restarts. For a disk bug
-this is often the whole answer, in about six lines.
+this is often the whole answer, in about ten lines.
 
 If that is not enough:
 
 ```
-go run -tags simfaults ./cmd/lockcheck -seed 1 -trace all -out report.txt
+go run -tags simfaults ./cmd/lockcheck -seed 7 -trace all -out report.txt
 ```
 
 Then use `grep` on the file:
@@ -369,7 +419,7 @@ Then use `grep` on the file:
 ```
 grep " state " report.txt        what the nodes believed
 grep " n0 " report.txt           everything one node did
-grep "#84" report.txt            one event and what it caused
+grep "#44" report.txt            one event and what it caused
 grep "rollback\|crash" report.txt   the dangerous moments
 grep "buggify" report.txt        the bad paths taken on purpose
 ```
@@ -391,22 +441,22 @@ Above the trace you see the faults that were used:
 
 ```
 schedule (2 faults):
-  t=275 node 0 paused; duration: 247
-  t=1416 node 0 crashed; wipe disk: false
-  buggify lockserver/skip-sync
+t=212    node 3 crashed; wipe disk: false
+t=773    node 0 crashed; wipe disk: false
+buggify  lockserver/skip-sync
 ```
 
-This is after shrinking. The tool started with 12 faults and 1 buggify point,
+This is after shrinking. The tool started with 19 faults and 1 buggify point,
 removed them one at a time, and kept only the ones needed to still break the
 rule.
 
-Two faults is short enough to think about. Twelve is not. This is why shrinking
-matters.
+Two faults is short enough to think about. Nineteen is not. This is why
+shrinking matters.
 
 To see the full list before shrinking:
 
 ```
-go run -tags simfaults ./cmd/lockcheck -seed 1 -no-shrink
+go run -tags simfaults ./cmd/lockcheck -seed 7 -no-shrink
 ```
 
 ---
@@ -419,13 +469,14 @@ Do not mix these up when reading a trace.
 synced are lost. When it comes back it is empty.
 
 ```
-t=1416   n0   crash
-t=1416   n0   rollback   1 unsynced keys lost
-t=1507   n0   restart
+t=773    #8    n0   crash
+t=773    #8    n0   rollback   1 unsynced keys lost
+t=918    #50   n0   restart
 ```
 
 **Pause.** The node is frozen. It keeps everything. Messages wait in a queue.
-When it wakes up they all arrive at once.
+When it wakes up they all arrive at once. Seed 7 has no pause, so this one is
+from another run:
 
 ```
 t=275    n0   pause
@@ -442,7 +493,7 @@ Look at `t=522`. Three messages arrive in the same instant. This is why pause
 finds different bugs from crash.
 
 **Partition.** The node keeps running. Its timers still fire. It changes its
-mind about things. It just cannot talk to anyone.
+mind about things. It just cannot talk to anyone. Also from another run:
 
 ```
 t=800   n0   dropped   deliver 1->0   (partitioned in flight)
@@ -455,7 +506,7 @@ why a partitioned node can still think it is the leader.
 own code, one that your protocol marked.
 
 ```
-t=1238   n0   buggify   lockserver/skip-sync
+t=708    #44   n0   buggify   lockserver/skip-sync
 ```
 
 The first three are things done to a node from outside. This one is inside.
@@ -473,6 +524,14 @@ Every message that does not arrive says why:
 | `timer superseded` | a newer timer with the same name replaced this one |
 | `partitioned in flight` | the message left, then the network split |
 | `node down` | the target was crashed when it arrived |
+
+Three of them show up in this one run:
+
+```
+t=300    #18   n3   dropped   timer "retry" tok=3  (stale epoch)
+t=469    #27   n3   dropped   timer "retry" tok=2  (timer superseded)
+t=782    #51   n0   dropped   deliver 3->0 ep=1 Acquire#3  (node down)
+```
 
 If a message vanishes with no reason line, that is a bug in the simulator, not
 in your protocol. Please let me know.
