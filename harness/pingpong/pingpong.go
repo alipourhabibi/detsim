@@ -71,7 +71,7 @@ func (d *driver) Node() *pingpong.PingPong {
 func NewPingPong(config sim.Config, a, b int, rounds uint64) (*driver, *driver, *sim.Sim) {
 	drivers := map[int]*driver{}
 	newNode := func(peer int, rounds uint64, starter bool) sim.NodeFactory {
-		return func(id int, deps sim.Deps) sim.Handler {
+		return func(id int) sim.Handler {
 			tn := &sim.Turn{}
 			nd := &driver{
 				node: pingpong.New(id, peer, rounds, 2*rounds, &transport{tn}, starter, Interval),

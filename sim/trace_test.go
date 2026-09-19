@@ -63,7 +63,7 @@ func (n *senderAt) OnMessage(*Ctx, int, Message) {}
 
 func TestStaleEpochEventIsDropped(t *testing.T) {
 	s := New(delayedConfig(1, 100), []int{0, 1},
-		func(id int, _ Deps) Handler {
+		func(id int) Handler {
 			if id == 0 {
 				return &senderAt{peer: 1, at: 10}
 			}
@@ -85,7 +85,7 @@ func TestStaleEpochEventIsDropped(t *testing.T) {
 
 func TestEventToCrashedNodeIsDropped(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1},
-		func(id int, _ Deps) Handler {
+		func(id int) Handler {
 			if id == 0 {
 				return &senderAt{peer: 1, at: 50}
 			}
@@ -106,7 +106,7 @@ func TestEventToCrashedNodeIsDropped(t *testing.T) {
 // Partition forms AFTER the send. The message left, then died on the wire.
 func TestPartitionedInFlightIsDropped(t *testing.T) {
 	s := New(delayedConfig(1, 100), []int{0, 1},
-		func(id int, _ Deps) Handler {
+		func(id int) Handler {
 			if id == 0 {
 				return &senderAt{peer: 1, at: 10}
 			}
@@ -131,7 +131,7 @@ func TestPartitionedInFlightIsDropped(t *testing.T) {
 // Partition forms BEFORE the send. The message never left.
 func TestUnreachableAtSendIsDropped(t *testing.T) {
 	s := New(delayedConfig(1, 100), []int{0, 1},
-		func(id int, _ Deps) Handler {
+		func(id int) Handler {
 			if id == 0 {
 				return &senderAt{peer: 1, at: 50}
 			}

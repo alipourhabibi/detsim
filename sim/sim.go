@@ -168,7 +168,7 @@ func (s *Sim) Start() {
 	s.started = true
 
 	for _, id := range s.order {
-		s.node(id).build(s.deps(id))
+		s.node(id).build()
 		s.requireDigester(id)
 	}
 	for _, id := range s.order {
@@ -356,12 +356,6 @@ func (s *Sim) idx(id int) nodeIdx {
 	return nodeIdx(i)
 }
 
-// deps is rebuilt on every restart, never cached: reseedNode replaces the
-// stream pointer, so a stale Deps would hand out a dead RNG.
-func (s *Sim) deps(id int) Deps {
-	return Deps{Id: id, Store: s.node(id).storage, Rand: s.nodeRand(id)}
-}
-
 func (s *Sim) nodeRand(id int) Rand {
 	return s.streams.at(s.idx(id))
 }
@@ -482,7 +476,7 @@ func (s *Sim) run() (bool, error) {
 		}
 		i := s.idx(evt.Target)
 		s.streams.reseedNode(i, n.epoch)
-		n.build(s.deps(evt.Target))
+		n.build()
 		s.requireDigester(evt.Target)
 		s.trace.Note(EnRestart, s.now, evt.Target, "", evt.Seq)
 		n.handler.OnRestart(ctx)
@@ -538,6 +532,9 @@ func (s *Sim) apply(node int, ef *Effect) {
 		s.trace.Note(EnTimerSet, s.now, node, ef.Name, s.current)
 	case EfSend:
 		s.send(node, ef.To, ef.Msg)
+	case EfDelete:
+		n.storage.Delete(ef.Key)
+		s.trace.Note(EnDurableDelete, s.now, node, ef.Key, s.current)
 	default:
 		panic(fmt.Sprintf("sim: unknown effect kind %v", ef.Kind))
 	}

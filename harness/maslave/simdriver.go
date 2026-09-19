@@ -63,7 +63,7 @@ func (c clock) SetTimer(name string, after int64) {
 func NewMasterSlavePinger(config sim.Config, masterNode int, slaveNodes []int) (*sim.Sim, map[int]*Driver) {
 	drivers := make(map[int]*Driver, len(slaveNodes)+1)
 	newNode := func(peers []int, role maslave.Role) sim.NodeFactory {
-		return func(id int, deps sim.Deps) sim.Handler {
+		return func(id int) sim.Handler {
 			tn := &sim.Turn{}
 			drv := &Driver{
 				turn: tn,

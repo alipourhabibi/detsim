@@ -233,7 +233,7 @@ func Build(cfg sim.Config, clientCount int, retryMs, holdMs int64) *Cluster {
 		leaseMs: holdMs,
 	}
 
-	serverFactory := func(id int, deps sim.Deps) sim.Handler {
+	serverFactory := func(id int) sim.Handler {
 		turn := &sim.Turn{}
 		d := &ServerDriver{
 			node: lockserver.NewServer(id, &transport{turn}, &storage{turn}, &injector{turn}),
@@ -243,7 +243,7 @@ func Build(cfg sim.Config, clientCount int, retryMs, holdMs int64) *Cluster {
 		return d
 	}
 
-	clientFactory := func(id int, deps sim.Deps) sim.Handler {
+	clientFactory := func(id int) sim.Handler {
 		turn := &sim.Turn{}
 		d := &ClientDriver{
 			node: lockserver.NewClient(id, serverID, retryMs, holdMs,

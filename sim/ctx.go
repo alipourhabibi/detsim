@@ -1,6 +1,9 @@
 package sim
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // Ctx is one turn in the simulation, during which the harness acts as one node.
 type Ctx struct {
@@ -8,6 +11,9 @@ type Ctx struct {
 	self int
 	out  *Effects
 	gen  uint64 // sim.events at creation; it guards the harness from use after callback
+
+	// pending holds this turn's writes, so a read sees them. nil value = deleted.
+	pending map[string][]byte
 }
 
 func (c *Ctx) check() {
@@ -35,16 +41,48 @@ func (c *Ctx) Rand() Rand {
 	return c.sim.nodeRand(c.self)
 }
 
-// durable read
+// Get reads this node's storage, including writes made earlier in this turn.
+// Other nodes see those writes only after the turn ends.
 func (c *Ctx) Get(key string) ([]byte, bool) {
 	c.check()
+	if v, ok := c.pending[key]; ok {
+		if v == nil {
+			return nil, false // deleted in this turn
+		}
+		return append([]byte(nil), v...), true
+	}
 	return c.sim.node(c.self).storage.Get(key)
 }
 
-// --- effects: recorded now, applied when the turn ends ---
+// Keys lists this node's keys, including this turn's writes. Sorted.
+func (c *Ctx) Keys() []string {
+	c.check()
+
+	set := map[string]struct{}{}
+	for _, k := range c.sim.node(c.self).storage.Keys() {
+		set[k] = struct{}{}
+	}
+	for k, v := range c.pending {
+		if v == nil {
+			delete(set, k) // deleted in this turn
+		} else {
+			set[k] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// --- effects: sends and timers happen when the turn ends ---
 //
-// Send does not send; Put does not write. The sim carries them out after the
-// callback returns, in the order they were recorded.
+// Writes go to this node's storage view right away, so a later Get in the same
+// turn sees them. Other nodes see nothing until the callback returns.
+// Sync decides what survives a crash.
 
 func (c *Ctx) Send(to int, msg Message) {
 	c.check()
@@ -69,12 +107,30 @@ func (c *Ctx) CancelTimer(name string) {
 
 func (c *Ctx) Put(key string, value []byte) {
 	c.check()
+	// copy: the harness may reuse its buffer
+	v := append([]byte(nil), value...)
+	if c.pending == nil {
+		c.pending = map[string][]byte{}
+	}
+	c.pending[key] = v
 	c.out.buf = append(c.out.buf, Effect{
-		Kind: EfPut,
+		Kind:  EfPut,
+		To:    c.self,
+		Key:   key,
+		Value: v,
+	})
+}
+
+func (c *Ctx) Delete(key string) {
+	c.check()
+	if c.pending == nil {
+		c.pending = map[string][]byte{}
+	}
+	c.pending[key] = nil
+	c.out.buf = append(c.out.buf, Effect{
+		Kind: EfDelete,
 		To:   c.self,
 		Key:  key,
-		// should copy it, a reusing buffer by harness, may corrupt earlier writes
-		Value: append([]byte(nil), value...),
 	})
 }
 

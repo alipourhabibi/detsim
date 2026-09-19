@@ -21,7 +21,7 @@ func (n *cancelThenSet) OnMessage(*Ctx, int, Message) {}
 func TestCancelThenSetLeavesTimerArmed(t *testing.T) {
 	made := map[int]*cancelThenSet{}
 	s := New(testConfig(1), []int{0},
-		stable(made, func(int, Deps) *cancelThenSet { return &cancelThenSet{} }))
+		stable(made, func(int) *cancelThenSet { return &cancelThenSet{} }))
 	s.Start()
 	if err := s.RunUntil(100); err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestCancelAfterSetInTheSameTurn(t *testing.T) {
 	fired := 0
 
 	s := New(testConfig(1), []int{0},
-		func(id int, deps Deps) Handler {
+		func(id int) Handler {
 			return effectHandler{
 				onRestart: func(c *Ctx) {
 					c.SetTimer("t", 10)
@@ -91,7 +91,7 @@ func TestEffectsApplyInEmissionOrder(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New(testConfig(1), []int{0, 1},
-				func(id int, _ Deps) Handler {
+				func(id int) Handler {
 					if id == 0 {
 						return &orderedEffects{peer: 1, sendFirst: tc.sendFirst}
 					}
@@ -143,7 +143,7 @@ func (n *bufferReuser) OnTimer(*Ctx, string)         {}
 // write, and that corruption would be schedule-dependent.
 func TestPutClonesValue(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1},
-		func(int, Deps) Handler { return &bufferReuser{} })
+		func(int) Handler { return &bufferReuser{} })
 	s.Start()
 
 	v, ok := s.Get(0, "k")

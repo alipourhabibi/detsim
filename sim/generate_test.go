@@ -306,7 +306,7 @@ func TestPlanReplayIsStable(t *testing.T) {
 
 	run := func() uint64 {
 		s := New(testConfig(31), testNodes,
-			func(id int, _ Deps) Handler {
+			func(id int) Handler {
 				return &pingOnTimer{peer: (id + 1) % len(testNodes)}
 			})
 		s.Start()

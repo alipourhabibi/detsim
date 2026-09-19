@@ -45,7 +45,7 @@ func (runaway) OnMessage(*Ctx, int, Message) {}
 func TestMaxEventsStopsRunawayLoop(t *testing.T) {
 	cfg := testConfig(1)
 	cfg.MaxEvents = 1000
-	s := New(cfg, []int{0}, func(int, Deps) Handler { return runaway{} })
+	s := New(cfg, []int{0}, func(int) Handler { return runaway{} })
 	s.Start()
 
 	err := s.RunUntil(1_000_000)

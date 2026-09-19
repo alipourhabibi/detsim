@@ -41,24 +41,25 @@ type Deps struct {
 }
 ```
 
-### Writes happen after your code returns
+### The Ctx is your node's disk and network for this turn
 
-Inside the node's callback, reads are done right away but writes are not. The
-simulator collects them and carries them out when your callback returns, in the
-order you wrote them.
+`Ctx` behaves like a normal store: you read back what you wrote.
 
 ```go
 ctx.Put("term", encode(5))
+ctx.Get("term")          // gives you 5, not the old value
 ctx.Sync()               // makes the line above durable, and nothing after it
-ctx.Send(peer, vote)     // goes out over a log that is on disk
+ctx.Send(peer, vote)     // goes out after your callback returns
 ```
 
-Two things follow from this:
+Three things follow from this:
 
+* `Sync` decides what survives a crash, not what you can read. A `Put` written
+  after the `Sync` is lost in a crash, but a `Get` still sees it in this turn.
+* Other nodes see nothing until your callback returns. Sends and timers are
+  carried out then, in the order you wrote them.
 * A `Ctx` only works inside the callback that got it. If you save it and use it
   later, it panics.
-* `Sync` covers the `Put` calls before it and nothing after it. A `Put` written
-  after the `Sync` is not durable, and a crash throws it away.
 
 ### Disk survives a crash, memory does not
 
@@ -69,6 +70,7 @@ else (your struct, your timers, waiting messages) is gone.
 ctx.Put("term", encode(5))
 ctx.Sync()                  // safe: this survives a crash
 ctx.Put("vote", encode(3))  // not synced: this is lost in a crash
+ctx.Get("vote")             // still 3 here: Sync is about crashes, not reads
 ```
 
 When a node crashes, every write since the last `Sync` is thrown away. That is

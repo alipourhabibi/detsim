@@ -103,13 +103,7 @@ func newNode(id int, f NodeFactory, st Store) *node {
 
 // Build a node from scratch
 // It is called once at Register time and also at each Restart
-type NodeFactory func(id int, deps Deps) Handler
-
-type Deps struct {
-	Id    int
-	Store Store
-	Rand  Rand
-}
+type NodeFactory func(id int) Handler
 
 type nodeClock struct {
 	offset Duration // fixed disagreement with sim time
@@ -196,9 +190,9 @@ func (n *node) bumpTimer(name string) uint64 {
 	return n.timers[name]
 }
 
-func (n *node) build(deps Deps) {
+func (n *node) build() {
 	if n.factory == nil {
 		panic("sim: node has no factory")
 	}
-	n.handler = n.factory(n.id, deps)
+	n.handler = n.factory(n.id)
 }

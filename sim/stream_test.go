@@ -9,7 +9,7 @@ func TestStreamsAreIndependent(t *testing.T) {
 			Delay: DelaySpec{Kind: DelayUniform, Base: 10, Spread: 50},
 		}
 		s := New(cfg, []int{0, 1},
-			func(id int, _ Deps) Handler {
+			func(id int) Handler {
 				if id == 0 {
 					return &pingOnTimer{peer: 1}
 				}
@@ -54,7 +54,7 @@ func TestPartitionDoesNotShiftLossStream(t *testing.T) {
 		cfg := testConfig(11)
 		cfg.NetworkConfig = NetworkConfig{LossPPM: 300_000}
 		s := New(cfg, []int{0, 1},
-			func(id int, _ Deps) Handler {
+			func(id int) Handler {
 				if id == 0 {
 					return &pingOnTimer{peer: 1}
 				}
@@ -83,7 +83,7 @@ func TestStateFoldOrderIsStable(t *testing.T) {
 		cfg := testConfig(13)
 		cfg.TraceLevel = TraceHashEventsAndState
 		s := New(cfg, []int{9, 3, 7, 1},
-			func(id int, _ Deps) Handler {
+			func(id int) Handler {
 				peer := 1
 				if id == 1 {
 					peer = 3

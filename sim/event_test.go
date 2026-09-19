@@ -27,7 +27,7 @@ func (n *timerOrder) OnMessage(*Ctx, int, Message) {}
 func TestSameInstantResolvesBySeq(t *testing.T) {
 	made := map[int]*timerOrder{}
 	s := New(testConfig(1), []int{0},
-		stable(made, func(int, Deps) *timerOrder {
+		stable(made, func(int) *timerOrder {
 			return &timerOrder{arm: []string{"a", "b", "c"}}
 		}))
 	s.Start()
@@ -76,7 +76,7 @@ func (n *parentProbe) OnMessage(*Ctx, int, Message) {}
 // Event.Parent links an event to the one whose handler caused it, so a trace
 // can be read as a causal tree.
 func TestParentLinksToCausingEvent(t *testing.T) {
-	s := New(testConfig(1), []int{0, 1}, func(id int, _ Deps) Handler {
+	s := New(testConfig(1), []int{0, 1}, func(id int) Handler {
 		return &parentProbe{peer: 1 - id}
 	})
 	s.Start()

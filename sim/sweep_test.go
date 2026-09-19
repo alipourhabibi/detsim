@@ -17,7 +17,7 @@ func trivialBuild(seed uint64, _ *Plan) (*Sim, uint64) {
 // A build that really applies the plan and produces events.
 func realBuild(seed uint64, p *Plan) (*Sim, uint64) {
 	s := New(testConfig(seed), []int{0, 1},
-		func(id int, _ Deps) Handler { return &pingOnTimer{peer: 1 - id} })
+		func(id int) Handler { return &pingOnTimer{peer: 1 - id} })
 	s.Start()
 	p.Apply(s)
 	return s, seed

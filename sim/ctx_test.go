@@ -20,7 +20,7 @@ func (n *timerCount) OnMessage(*Ctx, int, Message) {}
 func TestSetTimerResetsRatherThanStacks(t *testing.T) {
 	made := map[int]*timerCount{}
 	s := New(testConfig(1), []int{0},
-		stable(made, func(int, Deps) *timerCount {
+		stable(made, func(int) *timerCount {
 			return &timerCount{}
 		}))
 	s.Start()
@@ -58,7 +58,7 @@ func (n *cancelProbe) OnMessage(*Ctx, int, Message) {}
 func TestCancelTimerPreventsFire(t *testing.T) {
 	made := map[int]*cancelProbe{}
 	s := New(testConfig(1), []int{0},
-		stable(made, func(int, Deps) *cancelProbe { return &cancelProbe{} }))
+		stable(made, func(int) *cancelProbe { return &cancelProbe{} }))
 	s.Start()
 	if err := s.RunUntil(100); err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func (n *armOnceThenCount) OnMessage(*Ctx, int, Message) {}
 func TestTimersDoNotSurviveCrash(t *testing.T) {
 	made := map[int]*armOnceThenCount{}
 	s := New(testConfig(1), []int{0, 1},
-		stable(made, func(int, Deps) *armOnceThenCount {
+		stable(made, func(int) *armOnceThenCount {
 			return &armOnceThenCount{}
 		}))
 	s.Start()
@@ -112,7 +112,7 @@ func TestTimersDoNotSurviveCrash(t *testing.T) {
 func TestSupersededTimerIsTraced(t *testing.T) {
 	made := map[int]*timerCount{}
 	s := New(testConfig(1), []int{0},
-		stable(made, func(int, Deps) *timerCount {
+		stable(made, func(int) *timerCount {
 			return &timerCount{}
 		}))
 	s.Start()
@@ -154,7 +154,7 @@ func TestSavedCtxPanics(t *testing.T) {
 	}()
 
 	s := New(testConfig(1), []int{0, 1},
-		func(int, Deps) Handler { return &ctxSaver{} })
+		func(int) Handler { return &ctxSaver{} })
 	s.Start()
 	_ = s.RunUntil(100)
 }

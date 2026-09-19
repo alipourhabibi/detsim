@@ -29,7 +29,7 @@ func testConfig(seed uint64) Config {
 	}
 }
 
-func noop(int, Deps) Handler { return NoOpHandler{} }
+func noop(int) Handler { return NoOpHandler{} }
 
 // stable returns a factory that hands back the SAME handler instance for a
 // given id on every build, including across restarts.
@@ -38,11 +38,11 @@ func noop(int, Deps) Handler { return NoOpHandler{} }
 // which is the whole point of the durable/volatile split. Reusing the instance
 // is how a test observes what happened across a restart boundary, so these
 // handlers must only accumulate observations, never protocol state.
-func stable[T Handler](made map[int]T, mk func(id int, d Deps) T) NodeFactory {
-	return func(id int, d Deps) Handler {
+func stable[T Handler](made map[int]T, mk func(id int) T) NodeFactory {
+	return func(id int) Handler {
 		h, ok := made[id]
 		if !ok {
-			h = mk(id, d)
+			h = mk(id)
 			made[id] = h
 		}
 		return h

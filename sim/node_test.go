@@ -26,7 +26,7 @@ func (n *bootRecorder) OnTimer(*Ctx, string)         {}
 func TestStoreIsUsableFromFirstBoot(t *testing.T) {
 	made := map[int]*bootRecorder{}
 	s := New(testConfig(1), []int{0, 1},
-		stable(made, func(int, Deps) *bootRecorder { return &bootRecorder{} }))
+		stable(made, func(int) *bootRecorder { return &bootRecorder{} }))
 	s.Start()
 
 	v, ok := s.Get(0, "k")
@@ -38,7 +38,7 @@ func TestStoreIsUsableFromFirstBoot(t *testing.T) {
 func TestDurableStateSurvivesRestart(t *testing.T) {
 	made := map[int]*bootRecorder{}
 	s := New(testConfig(1), []int{0, 1},
-		stable(made, func(int, Deps) *bootRecorder { return &bootRecorder{} }))
+		stable(made, func(int) *bootRecorder { return &bootRecorder{} }))
 	s.Start()
 
 	s.InjectFault(NewCrashFault(0, false, 100)) // down, back up at t=100
@@ -75,7 +75,7 @@ func (twoPhaseWriter) OnMessage(*Ctx, int, Message) {}
 
 func TestCrashLosesUnsyncedWrites(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1},
-		func(int, Deps) Handler { return twoPhaseWriter{} })
+		func(int) Handler { return twoPhaseWriter{} })
 	s.Start()
 
 	if err := s.RunUntil(20); err != nil {
@@ -100,7 +100,7 @@ func TestCrashLosesUnsyncedWrites(t *testing.T) {
 
 func TestWipeDiskLosesEverything(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1},
-		func(int, Deps) Handler { return twoPhaseWriter{} })
+		func(int) Handler { return twoPhaseWriter{} })
 	s.Start()
 	if err := s.RunUntil(20); err != nil {
 		t.Fatal(err)
@@ -206,7 +206,7 @@ func (n *pingOnTimer) OnMessage(*Ctx, int, Message) {
 func TestPausedNodeDefersThenReceivesBurst(t *testing.T) {
 	made := map[int]*pingOnTimer{}
 	s := New(testConfig(1), []int{0, 1},
-		stable(made, func(id int, _ Deps) *pingOnTimer {
+		stable(made, func(id int) *pingOnTimer {
 			return &pingOnTimer{peer: 1 - id}
 		}))
 	s.Start()
@@ -262,7 +262,7 @@ func TestSecondCrashDoesNotStrandPendingRestart(t *testing.T) {
 func TestRestartFaultRunsFullRestartPath(t *testing.T) {
 	made := map[int]*bootRecorder{}
 	s := New(testConfig(1), []int{0, 1},
-		stable(made, func(int, Deps) *bootRecorder { return &bootRecorder{} }))
+		stable(made, func(int) *bootRecorder { return &bootRecorder{} }))
 	s.Start()
 
 	s.InjectFault(NewCrashFault(0, false, 0)) // stays down
@@ -305,13 +305,10 @@ func TestRestartOfHealthyNodeIsTracedNotFatal(t *testing.T) {
 }
 
 type randRecorder struct {
-	depsRand   Rand
-	draws      []int64
-	sameStream bool
+	draws []int64
 }
 
 func (n *randRecorder) OnRestart(ctx *Ctx) {
-	n.sameStream = n.depsRand == ctx.Rand()
 	n.draws = append(n.draws, ctx.Rand().Int64N(1<<40))
 }
 
@@ -321,8 +318,8 @@ func (n *randRecorder) OnTimer(*Ctx, string)         {}
 func TestRestartReseedsAndKeepsOneStream(t *testing.T) {
 	made := map[int]*randRecorder{}
 	s := New(testConfig(7), []int{0, 1},
-		stable(made, func(_ int, d Deps) *randRecorder {
-			return &randRecorder{depsRand: d.Rand}
+		stable(made, func(_ int) *randRecorder {
+			return &randRecorder{}
 		}))
 	s.Start()
 
@@ -334,9 +331,6 @@ func TestRestartReseedsAndKeepsOneStream(t *testing.T) {
 	}
 
 	n := made[0]
-	if !n.sameStream {
-		t.Error("deps.Rand and ctx.Rand() are different streams after restart")
-	}
 	if len(n.draws) != 4 {
 		t.Fatalf("got %d boots, want 4", len(n.draws))
 	}
@@ -365,7 +359,7 @@ func TestNonDenseNodeIDs(t *testing.T) {
 	ids := []int{5, 7, 9}
 	made := map[int]*selfRand{}
 	s := New(testConfig(3), ids,
-		stable(made, func(int, Deps) *selfRand { return &selfRand{} }))
+		stable(made, func(int) *selfRand { return &selfRand{} }))
 	s.Start()
 
 	seen := map[int64]int{}
@@ -406,7 +400,7 @@ func TestSelfSendPanics(t *testing.T) {
 	}()
 
 	s := New(testConfig(1), []int{0, 1},
-		func(int, Deps) Handler { return selfSender{} })
+		func(int) Handler { return selfSender{} })
 	s.Start()
 }
 
@@ -420,7 +414,7 @@ func TestFaultScheduleIsDeterministic(t *testing.T) {
 			DuplicationPPM: 10_000,
 		}
 		s := New(cfg, []int{0, 1},
-			stable(made, func(id int, _ Deps) *pingOnTimer {
+			stable(made, func(id int) *pingOnTimer {
 				return &pingOnTimer{peer: 1 - id}
 			}))
 		s.Start()
@@ -457,7 +451,7 @@ func TestDifferentSeedsDiverge(t *testing.T) {
 			LossPPM: 100_000,
 		}
 		s := New(cfg, []int{0, 1},
-			stable(made, func(id int, _ Deps) *pingOnTimer {
+			stable(made, func(id int) *pingOnTimer {
 				return &pingOnTimer{peer: 1 - id}
 			}))
 		s.Start()
@@ -474,7 +468,7 @@ func TestDifferentSeedsDiverge(t *testing.T) {
 
 func TestSyncDoesNotCoverLaterWrites(t *testing.T) {
 	s := New(testConfig(1), []int{0},
-		func(id int, deps Deps) Handler {
+		func(id int) Handler {
 			return effectHandler{
 				onRestart: func(c *Ctx) {
 					c.Put("k", []byte("durable"))

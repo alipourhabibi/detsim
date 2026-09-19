@@ -76,8 +76,8 @@ func setupSend(
 		NetworkConfig: nc,
 	}
 	s := New(cfg, []int{from, to},
-		func(int, Deps) Handler { return &sink{} },
-		WithFactory(from, func(int, Deps) Handler {
+		func(int) Handler { return &sink{} },
+		WithFactory(from, func(int) Handler {
 			return &sender{to: to, count: count, interval: interval}
 		}),
 	)

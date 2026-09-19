@@ -10,6 +10,7 @@ const (
 	EfCancelTimer
 	EfSetTimer
 	EfSend
+	EfDelete
 )
 
 func (k EffectKind) String() string {
@@ -24,6 +25,8 @@ func (k EffectKind) String() string {
 		return "setTimer"
 	case EfSend:
 		return "send"
+	case EfDelete:
+		return "delete"
 	}
 	return fmt.Sprintf("EfUnknown(%d)", uint8(k))
 }
@@ -40,6 +43,8 @@ func (e Effect) String() string {
 		return fmt.Sprintf("setTimer %q after=%d", e.Name, e.After)
 	case EfSend:
 		return fmt.Sprintf("send ->%d %v", e.To, e.Msg)
+	case EfDelete:
+		return fmt.Sprintf("delete %q", e.Key)
 	default:
 		return fmt.Sprintf("%v", e.Kind)
 	}

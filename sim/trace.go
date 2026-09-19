@@ -57,6 +57,7 @@ const (
 	EnNote
 	EnFault
 	EnState // a node changed what it believes
+	EnDurableDelete
 )
 
 func (k EntryKind) String() string {
@@ -103,6 +104,8 @@ func (k EntryKind) String() string {
 		return "fault"
 	case EnState:
 		return "state"
+	case EnDurableDelete:
+		return "durableDelete"
 	default:
 		return "unknown"
 	}
@@ -145,7 +148,7 @@ func (e Entry) String() string {
 func (t *Trace) DumpStorage(w io.Writer) error {
 	for _, e := range t.Entries() {
 		switch e.Kind {
-		case EnDurableWrite, EnSync, EnRollback, EnDiskWiped, EnCrash, EnRestart:
+		case EnDurableWrite, EnSync, EnRollback, EnDiskWiped, EnCrash, EnRestart, EnDurableDelete:
 			if _, err := fmt.Fprintln(w, e); err != nil {
 				return err
 			}
@@ -440,6 +443,8 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 			put(col[e.Target], e.Kind.String())
 		case EnDropped:
 			put(col[e.Event.Target], "x "+e.Reason)
+		case EnDurableDelete:
+			put(col[e.Target], "delete "+e.Reason)
 		default:
 			continue // sends are implied by their delivery
 		}
@@ -521,6 +526,9 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int) error {
 				flush()
 				fmt.Fprintf(w, "  deactivate n%d\n", e.Target)
 			}
+		case EnDurableDelete:
+			flush()
+			fmt.Fprintf(w, "  Note right of n%d: delete %s\n", e.Target, e.Reason)
 		}
 	}
 	flush()
