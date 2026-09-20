@@ -584,6 +584,18 @@ func (s *Sim) scheduleDeliver(from, to int, payload Message) {
 	s.pushDeliver(from, to, at, payload) // stamps dest epoch
 }
 
+// readCtx builds a read-only Ctx for id. State is read after the turn's
+// effects are applied, so there is nothing pending.
+func (s *Sim) readCtx(id int) *Ctx {
+	return &Ctx{
+		sim:      s,
+		self:     id,
+		out:      &s.effects,
+		gen:      s.events,
+		readonly: true,
+	}
+}
+
 // foldState mixes node state into the hash, catching two runs with an
 // identical event sequence but divergent state. Expensive: off by default.
 func (s *Sim) foldState() {
@@ -599,7 +611,7 @@ func (s *Sim) foldState() {
 			s.trace.FoldDown(id)
 			continue
 		}
-		s.trace.FoldState(id, h.(StateDigester))
+		s.trace.FoldState(id, s.readCtx(id), h.(StateDigester))
 	}
 }
 
@@ -615,7 +627,7 @@ func (s *Sim) reportStates() {
 			continue
 		}
 		if r, ok := h.(StateReporter); ok {
-			s.trace.ReportState(s.now, s.current, id, r.StateString())
+			s.trace.ReportState(s.now, s.current, id, r.StateString(s.readCtx(id)))
 		}
 	}
 }
@@ -631,7 +643,7 @@ func (s *Sim) States() map[int]string {
 			continue
 		}
 		if r, ok := h.(StateReporter); ok {
-			out[id] = r.StateString()
+			out[id] = r.StateString(s.readCtx(id))
 		}
 	}
 	return out

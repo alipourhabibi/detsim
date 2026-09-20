@@ -25,7 +25,7 @@ type driver struct {
 	turn *sim.Turn
 }
 
-func (d *driver) StateDigest(w io.Writer) {
+func (d *driver) StateDigest(_ *sim.Ctx, w io.Writer) {
 	var buf [17]byte
 	buf[0] = 'p'
 	binary.LittleEndian.PutUint64(buf[1:9], d.node.Count)

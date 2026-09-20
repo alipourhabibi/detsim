@@ -14,11 +14,21 @@ type Ctx struct {
 
 	// pending holds this turn's writes, so a read sees them. nil value = deleted.
 	pending map[string][]byte
+
+	readonly bool
 }
 
 func (c *Ctx) check() {
 	if c.gen != c.sim.events {
 		panic("sim: Ctx used outside the callback it was passed to")
+	}
+}
+
+// checkWrite guards the effect methods.
+func (c *Ctx) checkWrite() {
+	c.check()
+	if c.readonly {
+		panic("sim: this Ctx is read-only (state digest or report)")
 	}
 }
 
@@ -85,7 +95,7 @@ func (c *Ctx) Keys() []string {
 // Sync decides what survives a crash.
 
 func (c *Ctx) Send(to int, msg Message) {
-	c.check()
+	c.checkWrite()
 	if to == c.self {
 		panic(fmt.Sprintf("sim: node %d sent to itself", to))
 	}
@@ -96,17 +106,17 @@ func (c *Ctx) Send(to int, msg Message) {
 }
 
 func (c *Ctx) SetTimer(name string, after Duration) {
-	c.check()
+	c.checkWrite()
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSetTimer, Name: name, After: after})
 }
 
 func (c *Ctx) CancelTimer(name string) {
-	c.check()
+	c.checkWrite()
 	c.out.buf = append(c.out.buf, Effect{Kind: EfCancelTimer, Name: name})
 }
 
 func (c *Ctx) Put(key string, value []byte) {
-	c.check()
+	c.checkWrite()
 	// copy: the harness may reuse its buffer
 	v := append([]byte(nil), value...)
 	if c.pending == nil {
@@ -122,7 +132,7 @@ func (c *Ctx) Put(key string, value []byte) {
 }
 
 func (c *Ctx) Delete(key string) {
-	c.check()
+	c.checkWrite()
 	if c.pending == nil {
 		c.pending = map[string][]byte{}
 	}
@@ -135,6 +145,6 @@ func (c *Ctx) Delete(key string) {
 }
 
 func (c *Ctx) Sync() {
-	c.check()
+	c.checkWrite()
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSync})
 }

@@ -19,13 +19,14 @@ type Hashable interface {
 // StateDigester lets a node fold its state into the run hash, so two runs with
 // an identical event sequence but divergent node state still differ.
 type StateDigester interface {
-	StateDigest(w io.Writer)
+	StateDigest(ctx *Ctx, w io.Writer)
 }
 
 // StateReporter gives a short human-readable snapshot of what a node currently
 // believes: its role, its term, who it thinks the leader is.
+// ctx is read only
 type StateReporter interface {
-	StateString() string
+	StateString(ctx *Ctx) string
 }
 
 // A protocol message. Message is Hashable so payloads are checked at compile time
@@ -352,7 +353,7 @@ func (t *Trace) Note(kind EntryKind, at Time, node int, detail string, seq uint6
 //
 // This is what catches two runs that produce an identical event sequence while
 // the nodes end up in different states.
-func (t *Trace) FoldState(id int, d StateDigester) {
+func (t *Trace) FoldState(id int, ctx *Ctx, d StateDigester) {
 	if t.level < TraceHashEventsAndState {
 		return
 	}
@@ -360,7 +361,7 @@ func (t *Trace) FoldState(id int, d StateDigester) {
 	t.buf = append(t.buf, 'S')
 	t.buf = binary.LittleEndian.AppendUint64(t.buf, uint64(int64(id)))
 	t.h.Write(t.buf)
-	d.StateDigest(t.h)
+	d.StateDigest(ctx, t.h)
 }
 
 func (t *Trace) emit(kind EntryKind, e Event, reason string) {

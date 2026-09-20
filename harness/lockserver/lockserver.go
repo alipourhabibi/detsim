@@ -64,18 +64,18 @@ type ServerDriver struct {
 	turn *sim.Turn
 }
 
-func (d *ServerDriver) StateDigest(w io.Writer) {
+func (d *ServerDriver) StateDigest(_ *sim.Ctx, w io.Writer) {
 	var buf [9]byte
 	buf[0] = 's'
 	binary.LittleEndian.PutUint64(buf[1:], uint64(int64(d.node.LastGranted)))
 	w.Write(buf[:])
 }
 
-func (d *ServerDriver) StateString() string {
+func (d *ServerDriver) StateString(_ *sim.Ctx) string {
 	return fmt.Sprintf("granted=%d", d.node.LastGranted)
 }
 
-func (d *ClientDriver) StateDigest(w io.Writer) {
+func (d *ClientDriver) StateDigest(_ *sim.Ctx, w io.Writer) {
 	var buf [10]byte
 	buf[0] = 'c'
 	if d.node.Holding {
@@ -85,7 +85,7 @@ func (d *ClientDriver) StateDigest(w io.Writer) {
 	w.Write(buf[:])
 }
 
-func (d *ClientDriver) StateString() string {
+func (d *ClientDriver) StateString(_ *sim.Ctx) string {
 	if d.node.Holding {
 		return fmt.Sprintf("HOLDING attempt=%d", d.node.Attempt())
 	}

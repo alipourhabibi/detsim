@@ -183,7 +183,7 @@ type pingOnTimer struct {
 	received int
 }
 
-func (n *pingOnTimer) StateDigest(w io.Writer) {
+func (n *pingOnTimer) StateDigest(_ *Ctx, w io.Writer) {
 	var buf [9]byte
 	buf[0] = 'P'
 	binary.LittleEndian.PutUint64(buf[1:], uint64(n.received))
