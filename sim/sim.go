@@ -586,7 +586,7 @@ func (s *Sim) scheduleDeliver(from, to int, payload Message) {
 
 // readCtx builds a read-only Ctx for id. State is read after the turn's
 // effects are applied, so there is nothing pending.
-func (s *Sim) readCtx(id int) *Ctx {
+func (s *Sim) ReadCtx(id int) *Ctx {
 	return &Ctx{
 		sim:      s,
 		self:     id,
@@ -611,7 +611,7 @@ func (s *Sim) foldState() {
 			s.trace.FoldDown(id)
 			continue
 		}
-		s.trace.FoldState(id, s.readCtx(id), h.(StateDigester))
+		s.trace.FoldState(id, s.ReadCtx(id), h.(StateDigester))
 	}
 }
 
@@ -627,7 +627,7 @@ func (s *Sim) reportStates() {
 			continue
 		}
 		if r, ok := h.(StateReporter); ok {
-			s.trace.ReportState(s.now, s.current, id, r.StateString(s.readCtx(id)))
+			s.trace.ReportState(s.now, s.current, id, r.StateString(s.ReadCtx(id)))
 		}
 	}
 }
@@ -643,7 +643,7 @@ func (s *Sim) States() map[int]string {
 			continue
 		}
 		if r, ok := h.(StateReporter); ok {
-			out[id] = r.StateString(s.readCtx(id))
+			out[id] = r.StateString(s.ReadCtx(id))
 		}
 	}
 	return out
