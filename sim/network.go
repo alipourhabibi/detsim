@@ -258,8 +258,21 @@ func (n *Network) heal(id RuleID) {
 	n.removeRule(id)
 }
 
+// healAll removes every rule and turns off per-link noise, so a healed run
+// sees a clean network: no loss, no duplication, FIFO order.
 func (n *Network) healAll() {
 	n.rules = n.rules[:0]
+	for i := range n.links {
+		for j := range n.links[i] {
+			l := &n.links[i][j]
+			l.lossPPM = 0
+			l.dupPPM = 0
+			if l.reordering {
+				l.lastArrival = 0
+			}
+			l.reordering = false
+		}
+	}
 }
 
 func (n *Network) resetConnection(from, to int) {
