@@ -73,7 +73,7 @@ func (f crashFault) Apply(s *Sim) {
 }
 
 func (c crashFault) String() string {
-	return fmt.Sprintf("node %d crashed; wipe disk: %t", c.Node, c.WipeDisk)
+	return fmt.Sprintf("node %d crashed; wipe disk: %t; downtime: %d", c.Node, c.WipeDisk, c.Downtime)
 }
 
 func NewPauseFault(nodeId int, duration Duration) Fault {

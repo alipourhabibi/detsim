@@ -12,6 +12,7 @@ var (
 	_ Fault = healFault{}
 	_ Fault = resetConnectionFault{}
 	_ Fault = lossLinkFault{}
+	_ Fault = quiesceFault{}
 )
 
 type partitionFault struct {
@@ -29,9 +30,9 @@ func NewPartitionFault(a, b []int) Fault {
 }
 
 func (f partitionFault) Apply(s *Sim) {
-	s.lastRule = s.network.partition(f.A, f.B)
+	id := s.network.partition(f.A, f.B)
 	s.trace.Note(EnPartition, s.now, -1,
-		fmt.Sprintf("partition %v|%v rule=%d", f.A, f.B, s.lastRule), s.current)
+		fmt.Sprintf("partition %v|%v rule=%d", f.A, f.B, id), s.current)
 }
 
 func (f partitionFault) HashInto(w io.Writer) {
@@ -58,9 +59,9 @@ func NewIsolateFault(node int) Fault {
 }
 
 func (f isolateFault) Apply(s *Sim) {
-	s.lastRule = s.network.isolate(f.Node)
+	id := s.network.isolate(f.Node)
 	s.trace.Note(EnPartition, s.now, f.Node,
-		fmt.Sprintf("isolate %d rule=%d", f.Node, s.lastRule), s.current)
+		fmt.Sprintf("isolate %d rule=%d", f.Node, id), s.current)
 }
 
 func (f isolateFault) HashInto(w io.Writer) {
@@ -129,7 +130,7 @@ func (f lossLinkFault) HashInto(w io.Writer) {
 }
 
 func (f lossLinkFault) String() string {
-	return fmt.Sprintf("drop %d->%d %.1f%%", f.From, f.To, float64(f.DropPPM)/10000)
+	return fmt.Sprintf("drop %d->%d %.4f%%", f.From, f.To, float64(f.DropPPM)/10000)
 }
 
 func (f lossLinkFault) Equal(other any) bool {
@@ -158,7 +159,7 @@ func (f duplicateLinkFault) HashInto(w io.Writer) {
 }
 
 func (f duplicateLinkFault) String() string {
-	return fmt.Sprintf("duplicate %d->%d %.1f%%", f.From, f.To, float64(f.DuplicatePPM)/10000)
+	return fmt.Sprintf("duplicate %d->%d %.4f%%", f.From, f.To, float64(f.DuplicatePPM)/10000)
 }
 
 func (f duplicateLinkFault) Equal(other any) bool {
@@ -186,7 +187,7 @@ func (f resetConnectionFault) HashInto(w io.Writer) {
 }
 
 func (f resetConnectionFault) String() string {
-	return fmt.Sprintf("reset connection %d->%d ", f.From, f.To)
+	return fmt.Sprintf("reset connection %d->%d", f.From, f.To)
 }
 
 func (f resetConnectionFault) Equal(other any) bool {
@@ -198,8 +199,8 @@ func (f resetConnectionFault) Equal(other any) bool {
 type blockLinkFault struct{ From, To int }
 
 func (f blockLinkFault) Apply(s *Sim) {
-	s.lastRule = s.network.blockDirection([]int{f.From}, []int{f.To})
-	s.trace.Note(EnFault, s.now, -1, fmt.Sprintf("block %d->%d rule=%d", f.From, f.To, s.lastRule), s.current)
+	id := s.network.blockDirection([]int{f.From}, []int{f.To})
+	s.trace.Note(EnFault, s.now, -1, fmt.Sprintf("block %d->%d rule=%d", f.From, f.To, id), s.current)
 }
 
 func (f blockLinkFault) HashInto(w io.Writer) {
@@ -215,4 +216,25 @@ func (f blockLinkFault) String() string {
 func (f blockLinkFault) Equal(other any) bool {
 	o, ok := other.(blockLinkFault)
 	return ok && f == o
+}
+
+// quiesceFault makes the network perfect: no rules, no loss, no dup, FIFO.
+// Only for the liveness phase. Heal(0) goes back to the config instead.
+type quiesceFault struct{}
+
+func (quiesceFault) Apply(s *Sim) {
+	s.network.perfectify()
+}
+
+func (quiesceFault) HashInto(w io.Writer) {
+	hashTag(w, 'Q')
+}
+
+func (quiesceFault) String() string {
+	return "quiesce"
+}
+
+func (quiesceFault) Equal(other any) bool {
+	_, ok := other.(quiesceFault)
+	return ok
 }

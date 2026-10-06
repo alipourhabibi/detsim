@@ -414,7 +414,7 @@ func TestBridgeNodeCrossesPartition(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1, 2, 3}, noop)
 	s.Start()
 
-	s.Partition([]int{0, 1}, []int{2, 3})
+	s.network.partition([]int{0, 1}, []int{2, 3})
 
 	if s.network.reachable(0, 2, s.Now()) {
 		t.Fatal("setup: partition did not block 0->2")
@@ -440,7 +440,7 @@ func TestOverlappingPartitionsHealIndependently(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1, 2, 3}, noop)
 	s.Start()
 
-	split := s.Partition([]int{0, 1}, []int{2, 3})
+	split := s.network.partition([]int{0, 1}, []int{2, 3})
 	s.network.isolate(3)
 
 	if s.network.reachable(0, 2, s.Now()) {
@@ -450,7 +450,7 @@ func TestOverlappingPartitionsHealIndependently(t *testing.T) {
 		t.Fatal("setup: isolate not applied")
 	}
 
-	s.Heal(split)
+	s.network.heal(split)
 
 	if !s.network.reachable(0, 2, s.Now()) {
 		t.Error("healing the partition did not restore 0->2")
@@ -466,7 +466,7 @@ func TestHealUnknownRuleIsNoOp(t *testing.T) {
 	s := New(testConfig(1), []int{0, 1}, noop)
 	s.Start()
 
-	s.Heal(RuleID(9999)) // never existed
+	s.network.heal(RuleID(9999)) // never existed
 
 	if !s.network.reachable(0, 1, s.Now()) {
 		t.Fatal("healing an unknown rule broke reachability")
@@ -503,5 +503,43 @@ func TestResetConnectionClearsFIFOCursor(t *testing.T) {
 
 	if l.lastArrival != 0 {
 		t.Fatalf("lastArrival = %d after reset, want 0", l.lastArrival)
+	}
+}
+
+// A reset drops what is already on the wire, but not what is sent after it.
+func TestResetConnectionDropsInFlight(t *testing.T) {
+	var got []int64
+	factory := func(id int) Handler {
+		if id == 0 {
+			return effectHandler{
+				onRestart: func(c *Ctx) {
+					c.Send(1, testMsg{N: 1}) // arrives t=10, reset at t=5 kills it
+					c.SetTimer("again", 20)
+				},
+				onTimer: func(c *Ctx, _ string) {
+					c.Send(1, testMsg{N: 2}) // sent after the reset, must arrive
+				},
+			}
+		}
+		return effectHandler{
+			onMessage: func(_ *Ctx, _ int, m Message) {
+				got = append(got, m.(testMsg).N)
+			},
+		}
+	}
+
+	s := New(delayedConfig(1, 10), []int{0, 1}, factory)
+	s.Start()
+	s.ScheduleFault(5, NewResetConnectionFault(0, 1))
+
+	if err := s.RunUntilQuiescent(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("delivered %v, want [2]", got)
+	}
+	if n := droppedFor(s, "connection reset"); n != 1 {
+		t.Fatalf("%d drops for connection reset, want 1", n)
 	}
 }

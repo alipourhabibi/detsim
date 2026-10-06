@@ -78,9 +78,9 @@ func TestShrinkDoesNotMutateInput(t *testing.T) {
 func TestShrinkOnMinimalPlanChangesNothing(t *testing.T) {
 	fails := failsIfContains(1, 2, 3)
 	p := &Plan{Faults: []Scheduled{
-		{100, NewCrashFault(1, false, 10)},
-		{200, NewCrashFault(2, false, 10)},
-		{300, NewCrashFault(3, false, 10)},
+		{100, NewCrashFault(1, false, 1)},
+		{200, NewCrashFault(2, false, 1)},
+		{300, NewCrashFault(3, false, 1)},
 	}}
 	before := p.String()
 
@@ -119,5 +119,16 @@ func TestShrinkIsDeterministic(t *testing.T) {
 
 	if a.String() != b.String() {
 		t.Fatal("Shrink produced different results for the same input")
+	}
+}
+
+func TestShrinkHalvesValues(t *testing.T) {
+	fails := failsIfContains(2)
+	p := &Plan{Faults: []Scheduled{{100, NewCrashFault(2, false, 487)}}}
+
+	got := Shrink(p, fails)
+
+	if d := got.Faults[0].Fault.(crashFault).Downtime; d != 1 {
+		t.Fatalf("downtime shrunk to %d, want 1", d)
 	}
 }

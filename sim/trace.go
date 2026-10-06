@@ -455,10 +455,20 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 	return nil
 }
 
+// MermaidOpts keeps protocol names out of the trace code.
+//
+// SpanTimer is the timer that marks a span on a node, like a lease: set opens
+// it, cancel closes it. Empty means no spans. Anchor is the node the notes sit
+// over.
+type MermaidOpts struct {
+	SpanTimer string
+	Anchor    int
+}
+
 // Only the entries that carry the story: deliveries, durability, lifecycle.
 // Retries are collapsed, because twenty identical Acquire arrows say nothing
 // that one arrow and a count does not.
-func (t *Trace) Mermaid(w io.Writer, nodes []int) error {
+func (t *Trace) Mermaid(w io.Writer, nodes []int, opts MermaidOpts) error {
 	fmt.Fprintln(w, "sequenceDiagram")
 	for _, id := range nodes {
 		fmt.Fprintf(w, "  participant n%d\n", id)
@@ -472,7 +482,7 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int) error {
 
 	flush := func() {
 		if repeatN > 1 {
-			fmt.Fprintf(w, "  Note over n0: (%s x%d)\n", repeatMsg, repeatN)
+			fmt.Fprintf(w, "  Note over n%d: (%s x%d)\n", opts.Anchor, repeatMsg, repeatN)
 		}
 		repeatN, repeatMsg = 0, ""
 	}
@@ -481,7 +491,7 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int) error {
 		// A time marker whenever the clock moves, so gaps are visible.
 		if e.At != lastAt {
 			flush()
-			fmt.Fprintf(w, "  Note over n%d: t=%d\n", nodes[0], e.At)
+			fmt.Fprintf(w, "  Note over n%d: t=%d\n", opts.Anchor, e.At)
 			lastAt = e.At
 		}
 
@@ -518,12 +528,12 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int) error {
 			flush()
 			fmt.Fprintf(w, "  Note over n%d: restart\n", e.Target)
 		case EnTimerSet:
-			if e.Reason == "lease" { // entering the critical section
+			if opts.SpanTimer != "" && e.Reason == opts.SpanTimer {
 				flush()
 				fmt.Fprintf(w, "  activate n%d\n", e.Target)
 			}
 		case EnTimerCancelled:
-			if e.Reason == "lease" {
+			if opts.SpanTimer != "" && e.Reason == opts.SpanTimer {
 				flush()
 				fmt.Fprintf(w, "  deactivate n%d\n", e.Target)
 			}

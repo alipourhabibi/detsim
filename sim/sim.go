@@ -4,11 +4,16 @@ import (
 	"container/heap"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"slices"
 	"strings"
 )
 
-var ErrMaxEvents = errors.New("reached max events")
+var (
+	ErrMaxEvents      = errors.New("reached max events")
+	ErrHandlerPanic   = errors.New("handler panic")
+	ErrMessageChanged = errors.New("message changed after send")
+)
 
 type Config struct {
 	Seed      uint64
@@ -19,11 +24,15 @@ type Config struct {
 
 	NetworkConfig NetworkConfig
 	NewStore      func(id int) Store
+
+	// MaxClockSkew sets how far a node clock can be from sim time. Each node
+	// gets a fixed offset in [-MaxClockSkew, MaxClockSkew). 0 means no skew.
+	MaxClockSkew Duration
 }
 
 func (c Config) String() string {
-	return fmt.Sprintf("sim maxevents=%d trace=%v keep=%d %s",
-		c.MaxEvents, c.TraceLevel, c.TraceKeep, c.NetworkConfig)
+	return fmt.Sprintf("sim maxevents=%d trace=%v keep=%d skew=%d %s",
+		c.MaxEvents, c.TraceLevel, c.TraceKeep, c.MaxClockSkew, c.NetworkConfig)
 }
 
 func (s *Sim) requireDigester(id int) {
@@ -56,11 +65,11 @@ type Sim struct {
 	index map[int]nodeIdx // node id -> dense index, for per-node streams
 	order []int           // id in order
 
-	lastRule RuleID
-
 	invariants []Invariant
 
 	history *History
+
+	seenStates map[uint64]bool // hash of every global state this run passed through
 
 	buggifyOn    map[string]bool // points on for this run, set by Plan.Apply
 	buggifySeen  map[string]int  // times the code reached this point
@@ -84,6 +93,10 @@ func New(cfg Config, nodes []int, factory NodeFactory, opts ...Option) *Sim {
 
 	if len(nodes) == 0 {
 		panic("sim: no nodes")
+	}
+
+	if cfg.MaxClockSkew < 0 {
+		panic(fmt.Sprintf("sim: MaxClockSkew must be >= 0, got %d", cfg.MaxClockSkew))
 	}
 
 	if cfg.TraceKeep < KeepAll {
@@ -136,9 +149,19 @@ func New(cfg Config, nodes []int, factory NodeFactory, opts ...Option) *Sim {
 		index:   index,
 		history: newHistory(),
 
+		seenStates: map[uint64]bool{},
+
 		buggifyOn:    map[string]bool{},
 		buggifySeen:  map[string]int{},
 		buggifyFired: map[string]int{},
+	}
+
+	if cfg.MaxClockSkew > 0 {
+		// Own stream, so turning skew on does not move any other draw.
+		r := NewStream(cfg.Seed, StreamClock)
+		for _, id := range order {
+			nodeMap[id].clock.offset = Duration(r.Int64N(2*int64(cfg.MaxClockSkew)) - int64(cfg.MaxClockSkew))
+		}
 	}
 
 	for _, o := range opts {
@@ -182,6 +205,13 @@ func (s *Sim) Start() {
 	s.reportStates()
 }
 
+// StartWith applies the plan, then starts. Buggify must be on before the first
+// OnRestart, so this is the order to use.
+func (s *Sim) StartWith(p *Plan) {
+	p.Apply(s)
+	s.Start()
+}
+
 func (s *Sim) ScheduleFault(at Time, f Fault) uint64 {
 	return s.push(Event{At: at, Kind: EvFault, Source: -1, Target: -1, Payload: f})
 }
@@ -190,10 +220,13 @@ func (s *Sim) InjectFault(f Fault) uint64 {
 	return s.ScheduleFault(s.now, f)
 }
 
-func (s *Sim) pushDeliver(from, to int, at Time, msg Message) uint64 {
+func (s *Sim) pushDeliver(from, to int, at Time, msg Message, sum uint64) uint64 {
 	return s.push(Event{
 		At: at, Kind: EvDeliver, Source: from, Target: to,
-		Epoch: s.node(to).epoch, Payload: msg,
+		Epoch:   s.node(to).epoch,
+		Conn:    s.network.link(from, to).epoch,
+		Sum:     sum,
+		Payload: msg,
 	})
 }
 
@@ -258,7 +291,7 @@ func (s *Sim) RunUntilQuiescent() error {
 func (s *Sim) RunHealed(budget Duration) error {
 	// Scheduled, not applied: repairs belong in the trace and the hash like any
 	// other fault.
-	s.ScheduleFault(s.now, NewHealFault(0)) // rule 0: heal everything
+	s.ScheduleFault(s.now, quiesceFault{}) // no rules, no loss, no dup, FIFO
 
 	for _, id := range s.order {
 		switch s.node(id).status {
@@ -300,17 +333,10 @@ func (s *Sim) Up(id int) bool {
 	return s.node(id).status == Healthy
 }
 
-// Partition splits the cluster immediately and returns the RuleID for healing it.
-func (s *Sim) Partition(a, b []int) RuleID {
-	id := s.network.partition(a, b)
-	s.trace.Note(EnPartition, s.now, -1, fmt.Sprintf("partition %v|%v rule=%d", a, b, id), s.current)
-	return id
-}
-
-// Heal removes one rule. Heal(0) removes everything.
-func (s *Sim) Heal(id RuleID) {
-	s.network.heal(id)
-	s.trace.Note(EnHealed, s.now, -1, fmt.Sprintf("heal rule=%d", id), s.current)
+// Workload is a random stream for the harness, to vary when clients act.
+// Draw from it only inside a callback, so the draw order is the event order.
+func (s *Sim) Workload() Rand {
+	return s.streams.workload
 }
 
 // Handler returns a node's handler for assertions. nil while the node is
@@ -436,6 +462,11 @@ func (s *Sim) run() (bool, error) {
 		s.trace.Dropped(evt, "stale epoch")
 		return true, nil
 
+	case evt.Kind == EvDeliver && evt.Conn != s.network.link(evt.Source, evt.Target).epoch:
+		// The connection was reset while this was on the wire.
+		s.trace.Dropped(evt, "connection reset")
+		return true, nil
+
 	case evt.Kind == EvTimer && evt.Token != n.timers[evt.Name]:
 		s.trace.Dropped(evt, "timer superseded")
 		return true, nil
@@ -455,6 +486,12 @@ func (s *Sim) run() (bool, error) {
 		return true, nil
 	}
 
+	if evt.Kind == EvDeliver && msgSum(evt.Payload) != evt.Sum {
+		// The sender changed a slice or map inside the message after Send.
+		return true, fmt.Errorf("%w: %v from n%d to n%d at t=%d #%d",
+			ErrMessageChanged, evt.Payload, evt.Source, evt.Target, s.now, evt.Seq)
+	}
+
 	s.trace.Record(evt)
 
 	// dispatching...
@@ -468,8 +505,7 @@ func (s *Sim) run() (bool, error) {
 		gen:  s.events,
 	}
 
-	switch evt.Kind {
-	case EvRestart:
+	if evt.Kind == EvRestart {
 		if !n.reboot() {
 			s.trace.Dropped(evt, "restart of a node that is not crashed")
 			return true, nil
@@ -479,13 +515,21 @@ func (s *Sim) run() (bool, error) {
 		n.build()
 		s.requireDigester(evt.Target)
 		s.trace.Note(EnRestart, s.now, evt.Target, "", evt.Seq)
-		n.handler.OnRestart(ctx)
-	case EvDeliver:
-		n.handler.OnMessage(ctx, evt.Source, evt.Payload.(Message))
-	case EvTimer:
-		n.handler.OnTimer(ctx, evt.Name)
-	default:
-		panic(fmt.Sprintf("sim: unroutable event kind: %v", evt.Kind))
+	}
+
+	if err := s.guard(evt, func() {
+		switch evt.Kind {
+		case EvRestart:
+			n.handler.OnRestart(ctx)
+		case EvDeliver:
+			n.handler.OnMessage(ctx, evt.Source, evt.Payload.(Message))
+		case EvTimer:
+			n.handler.OnTimer(ctx, evt.Name)
+		default:
+			panic(fmt.Sprintf("sim: unroutable event kind: %v", evt.Kind))
+		}
+	}); err != nil {
+		return true, err
 	}
 
 	s.drain(evt.Target)
@@ -495,6 +539,19 @@ func (s *Sim) run() (bool, error) {
 		return true, err
 	}
 	return true, nil
+}
+
+// guard runs one handler call. A panic in protocol code becomes a run error,
+// so it gets a seed, a plan and a trace like any other failure.
+func (s *Sim) guard(evt Event, call func()) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w at t=%d #%d on n%d: %v",
+				ErrHandlerPanic, s.now, evt.Seq, evt.Target, r)
+		}
+	}()
+	call()
+	return nil
 }
 
 // drain applies the turn's effects in the order the handler emitted them.
@@ -563,15 +620,16 @@ func (s *Sim) send(from, to int, payload Message) {
 		s.trace.Dropped(base, "loss")
 		return
 	}
-	s.scheduleDeliver(from, to, payload)
+	sum := msgSum(payload)
+	s.scheduleDeliver(from, to, payload, sum)
 	if dup {
-		s.scheduleDeliver(from, to, payload)
+		s.scheduleDeliver(from, to, payload, sum)
 		s.trace.Note(EnNote, s.now, to, "duplicated", s.current)
 	}
 
 }
 
-func (s *Sim) scheduleDeliver(from, to int, payload Message) {
+func (s *Sim) scheduleDeliver(from, to int, payload Message, sum uint64) {
 	link := s.network.link(from, to)
 	at := s.now.Add(link.delay.Sample(s.streams.delay))
 
@@ -581,7 +639,15 @@ func (s *Sim) scheduleDeliver(from, to int, payload Message) {
 		link.lastArrival = at
 	}
 
-	s.pushDeliver(from, to, at, payload) // stamps dest epoch
+	s.pushDeliver(from, to, at, payload, sum) // stamps dest epoch
+}
+
+// msgSum hashes a message. Send stores it and delivery checks it, because the
+// message is passed by reference and a real network would have copied it.
+func msgSum(m Hashable) uint64 {
+	h := fnv.New64a()
+	m.HashInto(h)
+	return h.Sum64()
 }
 
 // readCtx builds a read-only Ctx for id. State is read after the turn's
@@ -620,16 +686,33 @@ func (s *Sim) reportStates() {
 	if s.cfg.TraceLevel == TraceOff {
 		return
 	}
+	global := fnv.New64a() // hash, not a string: this runs after every event
 	for _, id := range s.order {
 		h := s.node(id).handler
 		if h == nil {
 			s.trace.ReportState(s.now, s.current, id, "down")
+			global.Write([]byte("down\x00"))
 			continue
 		}
 		if r, ok := h.(StateReporter); ok {
-			s.trace.ReportState(s.now, s.current, id, r.StateString(s.ReadCtx(id)))
+			st := r.StateString(s.ReadCtx(id))
+			s.trace.ReportState(s.now, s.current, id, st)
+			global.Write([]byte(st + "\x00"))
 		}
 	}
+	s.seenStates[global.Sum64()] = true
+}
+
+// GlobalStates returns a hash of every distinct global state this run passed
+// through. Merge them over a sweep to see if seeds explore new ground or the
+// same few states again and again.
+func (s *Sim) GlobalStates() []uint64 {
+	out := make([]uint64, 0, len(s.seenStates))
+	for st := range s.seenStates {
+		out = append(out, st)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // States returns what every node currently believes, for assertions and for

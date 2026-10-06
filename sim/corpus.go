@@ -13,18 +13,24 @@ import (
 var ErrCorpusVersion = errors.New("sim: corpus version mismatch")
 
 // corpusVersion changes when a stored seed stops meaning what it meant.
-const corpusVersion = 1
+const corpusVersion = 2
 
 // SeedFailure is one seed that failed, and why.
 type SeedFailure struct {
 	Seed uint64
 	Err  error
+	Plan *Plan
 }
 
-// SeedEntry is one line from a corpus file
+// SeedEntry is one seed from a corpus file, with the plan that failed.
+//
+// The plan is saved as text, not drawn again from the seed. A seed alone
+// means a different run as soon as the plan generator changes. The plan
+// keeps meaning the same faults.
 type SeedEntry struct {
 	Seed   uint64
 	Reason string
+	Plan   *Plan // nil if the file had no plan lines for this seed
 }
 
 // SaveCorpus writes failing seeds so they can be run again later.
@@ -63,6 +69,16 @@ func SaveCorpus(w io.Writer, header string, entries []SeedEntry) error {
 		// One line each
 		reason := strings.TrimSpace(strings.SplitN(e.Reason, "\n", 2)[0])
 		fmt.Fprintf(bw, "%d\t%s\n", e.Seed, reason)
+
+		// The plan goes under its seed, one tab in.
+		if e.Plan != nil {
+			for _, f := range e.Plan.Faults {
+				fmt.Fprintf(bw, "\tt=%d %s\n", f.At, f.Fault)
+			}
+			for _, name := range e.Plan.Buggify {
+				fmt.Fprintf(bw, "\tbuggify %s\n", name)
+			}
+		}
 	}
 
 	return bw.Flush()
@@ -89,6 +105,20 @@ func LoadCorpus(r io.Reader) ([]SeedEntry, error) {
 	for line := 2; sc.Scan(); line++ {
 		text := strings.TrimSpace(sc.Text())
 		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(sc.Text(), "\t") {
+			if len(entries) == 0 {
+				return nil, fmt.Errorf("sim: corpus line %d: plan line with no seed above it", line)
+			}
+			e := &entries[len(entries)-1]
+			if e.Plan == nil {
+				e.Plan = &Plan{}
+			}
+			if err := e.Plan.addLine(text); err != nil {
+				return nil, fmt.Errorf("sim: corpus line %d: %w", line, err)
+			}
 			continue
 		}
 
@@ -128,7 +158,7 @@ func MergeCorpus(old []SeedEntry, fails []SeedFailure) []SeedEntry {
 		if f.Err != nil {
 			reason = f.Err.Error()
 		}
-		out = append(out, SeedEntry{Seed: f.Seed, Reason: reason})
+		out = append(out, SeedEntry{Seed: f.Seed, Reason: reason, Plan: f.Plan})
 		seen[f.Seed] = true
 	}
 
@@ -138,4 +168,26 @@ func MergeCorpus(old []SeedEntry, fails []SeedFailure) []SeedEntry {
 		}
 	}
 	return out
+}
+
+// addLine reads one saved plan line: "t=120 <fault>" or "buggify <name>".
+func (p *Plan) addLine(text string) error {
+	if name, ok := strings.CutPrefix(text, "buggify "); ok {
+		p.Buggify = append(p.Buggify, name)
+		return nil
+	}
+	at, rest, ok := strings.Cut(strings.TrimPrefix(text, "t="), " ")
+	if !ok || !strings.HasPrefix(text, "t=") {
+		return fmt.Errorf("%q is not a plan line", text)
+	}
+	t, err := strconv.ParseInt(at, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%q has a bad time", text)
+	}
+	f, err := ParseFault(rest)
+	if err != nil {
+		return err
+	}
+	p.Faults = append(p.Faults, Scheduled{At: Time(t), Fault: f})
+	return nil
 }

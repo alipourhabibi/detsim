@@ -2,6 +2,7 @@ package sim
 
 import (
 	"errors"
+	"io"
 	"testing"
 )
 
@@ -118,4 +119,65 @@ func TestStartTwicePanics(t *testing.T) {
 
 	defer wantPanic(t, "second Start")()
 	s.Start()
+}
+
+// Skew gives each node its own fixed offset, the same for the same seed.
+func TestClockSkew(t *testing.T) {
+	offsets := func() []Duration {
+		cfg := testConfig(5)
+		cfg.MaxClockSkew = 1000
+		s := New(cfg, []int{0, 1, 2}, noop)
+		var out []Duration
+		for _, id := range s.Nodes() {
+			o := Duration(s.nodeNow(id) - s.Now())
+			if o < -1000 || o >= 1000 {
+				t.Fatalf("node %d offset %d is out of range", id, o)
+			}
+			out = append(out, o)
+		}
+		return out
+	}
+
+	a, b := offsets(), offsets()
+	if a[0] == a[1] && a[1] == a[2] {
+		t.Fatalf("all nodes got the same offset %v", a)
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("same seed gave offsets %v then %v", a, b)
+		}
+	}
+}
+
+type sliceMsg struct{ Vals []int64 }
+
+func (m sliceMsg) HashInto(w io.Writer) {
+	h := hashTag(w, 'S')
+	for _, v := range m.Vals {
+		h.i64(v)
+	}
+}
+
+func (m sliceMsg) Equal(o any) bool { _, ok := o.(sliceMsg); return ok }
+
+// The sender keeps the slice and changes it while the message is on the wire.
+func TestMessageChangedAfterSend(t *testing.T) {
+	vals := []int64{1}
+	s := New(delayedConfig(1, 10), []int{0, 1}, func(id int) Handler {
+		if id != 0 {
+			return NoOpHandler{}
+		}
+		return effectHandler{
+			onRestart: func(c *Ctx) {
+				c.Send(1, sliceMsg{Vals: vals})
+				c.SetTimer("change", 5)
+			},
+			onTimer: func(*Ctx, string) { vals[0] = 2 },
+		}
+	})
+	s.Start()
+
+	if err := s.RunUntilQuiescent(); !errors.Is(err, ErrMessageChanged) {
+		t.Fatalf("got %v, want ErrMessageChanged", err)
+	}
 }

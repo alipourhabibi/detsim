@@ -8,18 +8,14 @@ import (
 
 var fakeErr = errors.New("fake failure")
 
-func trivialBuild(seed uint64, _ *Plan) (*Sim, uint64) {
-	s := New(testConfig(seed), []int{0, 1}, noop)
-	s.Start()
-	return s, seed
+func trivialBuild(seed uint64) (*Sim, uint64) {
+	return New(testConfig(seed), []int{0, 1}, noop), seed
 }
 
-// A build that really applies the plan and produces events.
-func realBuild(seed uint64, p *Plan) (*Sim, uint64) {
+// A build whose nodes produce events, so the plan has something to hit.
+func realBuild(seed uint64) (*Sim, uint64) {
 	s := New(testConfig(seed), []int{0, 1},
 		func(id int) Handler { return &pingOnTimer{peer: 1 - id} })
-	s.Start()
-	p.Apply(s)
 	return s, seed
 }
 
@@ -118,24 +114,53 @@ func TestSweepFailureIsReproducible(t *testing.T) {
 	}
 }
 
-// The plan handed to build must be the plan gen produced for that seed. If they
+// The reported plan must be the plan gen produced for that seed. If they
 // diverge, the reported plan does not reproduce the reported failure.
-func TestSweepPassesGeneratedPlanToBuild(t *testing.T) {
-	var generated, built *Plan
+func TestSweepReportsGeneratedPlan(t *testing.T) {
+	var generated *Plan
 
 	gen := func(seed uint64, r Rand) *Plan {
 		generated = GeneratePlan(testPlanConfig(), []int{0, 1}, seed, r)
 		return generated
 	}
-	build := func(seed uint64, p *Plan) (*Sim, uint64) {
-		built = p
-		return trivialBuild(seed, p)
+
+	f, _ := Sweep(1, 2, gen, trivialBuild, func(*Sim, uint64) error { return fakeErr })
+
+	if f == nil || f.Plan != generated {
+		t.Fatal("failure carries a different plan than gen produced")
+	}
+}
+
+// No trace while sweeping, the whole trace for the failure it reports.
+func TestSweepKeepsTraceOnlyForTheFailure(t *testing.T) {
+	var kept []int
+	var mu sync.Mutex
+
+	check := func(s *Sim, seed uint64) error {
+		if err := s.RunUntil(500); err != nil {
+			return err
+		}
+		mu.Lock()
+		kept = append(kept, s.Trace().Len())
+		mu.Unlock()
+		if seed == 3 {
+			return fakeErr
+		}
+		return nil
+	}
+	gen := func(seed uint64, r Rand) *Plan {
+		return GeneratePlan(testPlanConfig(), []int{0, 1}, seed, r)
 	}
 
-	Sweep(1, 2, gen, build, func(*Sim, uint64) error { return fakeErr })
+	f, _ := Sweep(1, 6, gen, realBuild, check)
 
-	if built != generated {
-		t.Fatal("build received a different plan than gen produced")
+	for _, n := range kept[:5] { // the sweep runs; the last one is the report run
+		if n != 0 {
+			t.Fatalf("a sweep run kept %d trace entries, want 0", n)
+		}
+	}
+	if f == nil || f.Sim.Trace().Len() == 0 {
+		t.Fatal("the reported failure has no trace")
 	}
 }
 

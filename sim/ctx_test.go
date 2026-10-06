@@ -1,6 +1,9 @@
 package sim
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 type timerCount struct {
 	fires int
@@ -146,15 +149,12 @@ func (n *ctxSaver) OnMessage(*Ctx, int, Message) {}
 // A saved Ctx would otherwise write effects into whatever buffer is current,
 // which means one node's send landing in another node's turn. The generation
 // counter catches it.
+// The panic comes back as a run error, like any handler panic.
 func TestSavedCtxPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("using a Ctx outside its callback did not panic")
-		}
-	}()
-
 	s := New(testConfig(1), []int{0, 1},
 		func(int) Handler { return &ctxSaver{} })
 	s.Start()
-	_ = s.RunUntil(100)
+	if err := s.RunUntil(100); !errors.Is(err, ErrHandlerPanic) {
+		t.Fatalf("using a Ctx outside its callback gave %v, want ErrHandlerPanic", err)
+	}
 }

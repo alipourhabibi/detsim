@@ -49,9 +49,15 @@ func (s *storage) Sync() {
 
 type timers struct {
 	turn *sim.Turn
+	work sim.Rand // the workload stream
 }
 
 func (t *timers) SetTimer(name string, afterMs int64) {
+	// Move each retry by up to half its wait, so requests do not arrive on a
+	// fixed beat. The lease stays exact: that is the protocol, not the load.
+	if name == "retry" {
+		afterMs += t.work.Int64N(afterMs/2 + 1)
+	}
 	t.turn.Ctx().SetTimer(name, sim.Duration(afterMs))
 }
 
@@ -126,6 +132,7 @@ type ClientDriver struct {
 	node    *lockserver.Client
 	turn    *sim.Turn
 	history *sim.History
+	sim     *sim.Sim // history uses sim time, not the node clock, which can be skewed
 }
 
 func (d *ClientDriver) Node() *lockserver.Client {
@@ -137,7 +144,7 @@ func (d *ClientDriver) OnRestart(ctx *sim.Ctx) {
 	defer d.turn.Leave()
 
 	d.node.Start()
-	d.history.Invoke(ctx.Now(), d.node.Id, opAcquire, d.node.Attempt())
+	d.history.Invoke(d.sim.Now(), d.node.Id, opAcquire, d.node.Attempt())
 }
 
 func (d *ClientDriver) OnTimer(ctx *sim.Ctx, name string) {
@@ -152,12 +159,12 @@ func (d *ClientDriver) OnTimer(ctx *sim.Ctx, name string) {
 	case "retry":
 		// The protocol gave up on prev and sent a new one.
 		d.history.Abandon(d.node.Id, prev)
-		d.history.Invoke(ctx.Now(), d.node.Id, opAcquire, d.node.Attempt())
+		d.history.Invoke(d.sim.Now(), d.node.Id, opAcquire, d.node.Attempt())
 
 	case "lease":
 		// The lease ran out. The protocol sent a Release and schedule retry.
 		// No reply is coming, so it is Unknown from the moment it is sent.
-		d.history.Invoke(ctx.Now(), d.node.Id, opRelease, prev)
+		d.history.Invoke(d.sim.Now(), d.node.Id, opRelease, prev)
 
 		// The protocol ignores answers to old attempts, in OnGranted. This does the
 		// same, so both agree on which answers count.
@@ -174,7 +181,7 @@ func (d *ClientDriver) OnMessage(ctx *sim.Ctx, from int, msg sim.Message) {
 		panic(fmt.Sprintf("lockserver: client got %T", msg))
 	}
 
-	d.history.Complete(ctx.Now(), d.node.Id, m.Attempt)
+	d.history.Complete(d.sim.Now(), d.node.Id, m.Attempt)
 
 	d.node.OnGranted(m)
 }
@@ -247,9 +254,10 @@ func Build(cfg sim.Config, clientCount int, retryMs, holdMs int64) *Cluster {
 		turn := &sim.Turn{}
 		d := &ClientDriver{
 			node: lockserver.NewClient(id, serverID, retryMs, holdMs,
-				&transport{turn}, &timers{turn}, &injector{turn}),
+				&transport{turn}, &timers{turn, c.Sim.Workload()}, &injector{turn}),
 			turn:    turn,
 			history: c.Sim.History(),
+			sim:     c.Sim,
 		}
 		c.clients[id] = d
 		return d

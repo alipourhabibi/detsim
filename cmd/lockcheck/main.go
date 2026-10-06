@@ -22,6 +22,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	lockharness "github.com/alipourhabibi/detsim/harness/lockserver"
 	"github.com/alipourhabibi/detsim/protocol/lockserver"
@@ -51,7 +52,7 @@ var (
 func main() {
 	flag.Parse()
 
-	c := &checker{nodes: []int{0}} // 0 is the server
+	c := &checker{nodes: []int{0}, keep: sim.KeepAll, states: map[uint64]bool{}} // 0 is the server
 	for i := 1; i <= clients; i++ {
 		c.nodes = append(c.nodes, i)
 	}
@@ -69,58 +70,86 @@ func main() {
 // checker holds the cluster from the most recent build.
 type checker struct {
 	nodes []int
+	keep  int // trace entries to keep: none while shrinking, all for a report
+
+	mu     sync.Mutex
+	states map[uint64]bool // global states seen over the sweep
 }
 
-func (c *checker) simConfig(seed uint64) sim.Config {
-	return sim.Config{
-		Seed:       seed,
-		MaxEvents:  200_000,
-		TraceLevel: sim.TraceHashEvents,
-		TraceKeep:  sim.KeepAll,
-		NetworkConfig: sim.NetworkConfig{
-			Delay:   sim.DelaySpec{Kind: sim.DelayUniform, Base: 2, Spread: 8},
-			LossPPM: 20_000, // 2 percent
-		},
+// swarm draws the weather for one seed. Some seeds get a calm network, some
+// get a storm. Same seed, same weather.
+func (c *checker) swarm(seed uint64) (sim.NetworkConfig, sim.PlanConfig) {
+	r := sim.NewStream(seed, sim.StreamSwarm)
+	weight := func() int { return int(r.Int64N(2) * (1 + r.Int64N(6))) } // off half the time
+
+	net := sim.NetworkConfig{
+		Delay:   sim.DelaySpec{Kind: sim.DelayUniform, Base: sim.Duration(1 + r.Int64N(4)), Spread: sim.Duration(1 + r.Int64N(20))},
+		LossPPM: uint32(r.Int64N(50_000)), // up to 5 percent
 	}
-}
-
-func (c *checker) planConfig() sim.PlanConfig {
-	return sim.PlanConfig{
+	plan := sim.PlanConfig{
 		Until:       until,
-		MeanGap:     250,
-		MaxDown:     1,
-		MaxDowntime: leaseMs / 2,
-		MaxPause:    leaseMs * 4 / 3,
+		MeanGap:     sim.Duration(50 + r.Int64N(400)),
+		MaxDown:     int(1 + r.Int64N(2)),
+		MaxDowntime: sim.Duration(1 + r.Int64N(leaseMs)),
+		MaxPause:    sim.Duration(1 + r.Int64N(2*leaseMs)),
 		WipeChance:  40,
 		MaxDropPPM:  200_000,
 		Weights: sim.Weights{
-			Crash: 6, Pause: 3, Partition: 2, Isolate: 1, DropLink: 1, Heal: 3,
+			Crash: weight(), Pause: weight(), Partition: weight(),
+			Isolate: weight(), DropLink: weight(), Heal: int(1 + r.Int64N(3)),
 		},
 
 		Buggify:        lockserver.AllBuggify,
-		BuggifyPercent: 25,
+		BuggifyPercent: int(r.Int64N(50)),
+	}
+	return net, plan
+}
+
+func (c *checker) simConfig(seed uint64) sim.Config {
+	net, _ := c.swarm(seed)
+	return sim.Config{
+		Seed:          seed,
+		MaxEvents:     200_000,
+		TraceLevel:    sim.TraceHashEvents,
+		TraceKeep:     c.keep,
+		NetworkConfig: net,
 	}
 }
 
 func (c *checker) createPlan(s uint64, r sim.Rand) *sim.Plan {
-	return sim.GeneratePlan(c.planConfig(), c.nodes, s, r)
+	_, cfg := c.swarm(s)
+	return sim.GeneratePlan(cfg, c.nodes, s, r)
 }
 
 func (c *checker) build(s uint64, p *sim.Plan) (*sim.Sim, *lockharness.Cluster) {
 	cl := lockharness.Build(c.simConfig(s), clients, retryMs, leaseMs)
-	cl.Sim.Start()
-	p.Apply(cl.Sim)
+	cl.Sim.StartWith(p)
+	return cl.Sim, cl
+}
+
+// sweepBuild is build without the start. Sweep starts it.
+func (c *checker) sweepBuild(s uint64) (*sim.Sim, *lockharness.Cluster) {
+	cl := lockharness.Build(c.simConfig(s), clients, retryMs, leaseMs)
 	return cl.Sim, cl
 }
 
 func (c *checker) check(s *sim.Sim, cl *lockharness.Cluster) error {
 	only := *checkMode
+	defer c.cover(s)
 
 	if only == "liveness" {
 		s.ClearInvariants()
 	}
 
 	if err := s.RunUntil(until); err != nil {
+		switch {
+		case errors.Is(err, sim.ErrMaxEvents):
+			return fmt.Errorf("livelock: %w", err)
+		case errors.Is(err, sim.ErrHandlerPanic):
+			return fmt.Errorf("panic: %w", err)
+		case errors.Is(err, sim.ErrMessageChanged):
+			return fmt.Errorf("message: %w", err)
+		}
 		return fmt.Errorf("invariant: %w", err)
 	}
 
@@ -141,29 +170,42 @@ func (c *checker) check(s *sim.Sim, cl *lockharness.Cluster) error {
 	return nil
 }
 
-// fail shrinks the plan and prints the report. Returns the exit code.
-func (c *checker) fail(s uint64, plan *sim.Plan, cl *lockharness.Cluster, err error) int {
-	if *noShrink {
-		c.report(s, plan, cl, err)
-		return 1
+// cover adds the global states of one run to the sweep total.
+func (c *checker) cover(s *sim.Sim) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, st := range s.GlobalStates() {
+		c.states[st] = true
+	}
+}
+
+// fail shrinks the plan and prints the report. Returns the exit code and the
+// plan it reported.
+func (c *checker) fail(s uint64, plan *sim.Plan, err error) (int, *sim.Plan) {
+	small := plan
+	if !*noShrink {
+		c.keep = 0 // shrinking only needs pass or fail, not the story
+		small = sim.Shrink(plan, func(p *sim.Plan) bool {
+			sm, scl := c.build(s, p)
+			return c.check(sm, scl) != nil
+		})
+		fmt.Printf("shrunk %d faults to %d, %d buggify to %d\n",
+			plan.Len(), small.Len(), plan.BuggifyLen(), small.BuggifyLen())
 	}
 
-	small := sim.Shrink(plan, func(p *sim.Plan) bool {
-		sm, scl := c.build(s, p)
-		return c.check(sm, scl) != nil
-	})
-	fmt.Printf("shrunk %d faults to %d, %d buggify to %d\n",
-		plan.Len(), small.Len(), plan.BuggifyLen(), small.BuggifyLen())
-
+	// Run it again with the whole trace, for the report.
+	c.keep = sim.KeepAll
 	sm, scl := c.build(s, small)
 	if smallErr := c.check(sm, scl); smallErr != nil {
 		c.report(s, small, scl, smallErr)
-		return 1
+		return 1, small
 	}
 
-	fmt.Fprintln(os.Stderr, "\nWARNING: the shrunk plan does not reproduce. The run is not deterministic, so nothing here can be trusted.")
+	fmt.Fprintln(os.Stderr, "\nWARNING: the plan does not reproduce. The run is not deterministic, so nothing here can be trusted.")
+	sm, cl := c.build(s, plan)
+	c.check(sm, cl)
 	c.report(s, plan, cl, err)
-	return 2
+	return 2, plan
 }
 
 func (c *checker) report(s uint64, plan *sim.Plan, cl *lockharness.Cluster, err error) {
@@ -203,7 +245,7 @@ func (c *checker) report(s uint64, plan *sim.Plan, cl *lockharness.Cluster, err 
 	if *mermaid {
 		fmt.Fprintln(w, "\nmermaid:")
 		fmt.Fprintln(w)
-		cl.Sim.Trace().Mermaid(w, c.nodes)
+		cl.Sim.Trace().Mermaid(w, c.nodes, sim.MermaidOpts{SpanTimer: "lease", Anchor: cl.Server})
 	}
 
 	if *out != "" {
@@ -239,7 +281,8 @@ func (c *checker) runOne(s uint64) int {
 		fmt.Printf("seed %d: clean, %d faults over %d ms\n", s, plan.Len(), until)
 		return 0
 	}
-	return c.fail(s, plan, cl, err)
+	code, _ := c.fail(s, plan, err)
+	return code
 }
 
 // sweep walks the range and stops at the first failure.
@@ -252,11 +295,11 @@ func (c *checker) sweep() int {
 
 	fmt.Printf("sweeping seeds %d..%d\n", from, to)
 
-	f, all := sim.Sweep(from, to, c.createPlan, c.build, c.check)
+	f, all := sim.Sweep(from, to, c.createPlan, c.sweepBuild, c.check)
 
-	if err := c.saveCorpus(all); err != nil {
-		fmt.Fprintf(os.Stderr, "lockcheck: cannot save corpus: %v\n", err)
-	}
+	// If this number stays small while the range grows, the seeds are not
+	// finding new ground.
+	fmt.Printf("%d distinct global states seen\n", len(c.states))
 
 	if f == nil {
 		fmt.Printf("clean: %d seeds, no violation\n", to-from)
@@ -264,7 +307,18 @@ func (c *checker) sweep() int {
 	}
 
 	fmt.Printf("failed at seed %d\n", f.Seed)
-	code := c.fail(f.Seed, f.Plan, f.Ctx, f.Err)
+	code, small := c.fail(f.Seed, f.Plan, f.Err)
+
+	// Save the shrunk plan for this seed, it reads like a bug report.
+	for i := range all {
+		if all[i].Seed == f.Seed {
+			all[i].Plan = small
+		}
+	}
+	if err := c.saveCorpus(all); err != nil {
+		fmt.Fprintf(os.Stderr, "lockcheck: cannot save corpus: %v\n", err)
+	}
+
 	if code == 1 {
 		fmt.Printf("\nreplay with: go run ./cmd/lockcheck -seed %d\n", f.Seed)
 	}
@@ -316,7 +370,8 @@ func (c *checker) saveCorpus(fails []sim.SeedFailure) error {
 	}
 	defer f.Close()
 
-	header := fmt.Sprintf("%s\n%s", c.simConfig(0), c.planConfig())
+	header := fmt.Sprintf("lockcheck clients=%d retry=%d lease=%d until=%d\n"+
+		"network and plan config are drawn per seed (swarm)", clients, retryMs, leaseMs, until)
 	return sim.SaveCorpus(f, header, sim.MergeCorpus(old, fails))
 }
 
@@ -333,24 +388,27 @@ func (c *checker) rerunCorpus() int {
 		fmt.Fprintf(os.Stderr, "lockcheck: %v\n", err)
 		return 2
 	}
-	seeds := sim.Seeds(entries)
-
-	fmt.Printf("rerunning %d seeds from %s\n", len(seeds), *corpusPath)
+	fmt.Printf("rerunning %d seeds from %s\n", len(entries), *corpusPath)
 
 	var failed []uint64
-	for _, seed := range seeds {
-		plan := c.createPlan(seed, sim.NewStream(seed, sim.StreamFault))
-		if err := c.check(c.build(seed, plan)); err != nil {
-			fmt.Printf("  seed %d still fails: %v\n", seed, err)
-			failed = append(failed, seed)
+	for _, e := range entries {
+		// The saved plan, not a new one from the seed. The seed still drives
+		// the network and the nodes.
+		plan := e.Plan
+		if plan == nil {
+			plan = c.createPlan(e.Seed, sim.NewStream(e.Seed, sim.StreamFault))
+		}
+		if err := c.check(c.build(e.Seed, plan)); err != nil {
+			fmt.Printf("  seed %d still fails: %v\n", e.Seed, err)
+			failed = append(failed, e.Seed)
 		}
 	}
 
 	if len(failed) == 0 {
-		fmt.Printf("all %d seeds pass\n", len(seeds))
+		fmt.Printf("all %d seeds pass\n", len(entries))
 		return 0
 	}
-	fmt.Printf("%d of %d seeds still fail\n", len(failed), len(seeds))
+	fmt.Printf("%d of %d seeds still fail\n", len(failed), len(entries))
 	return 1
 }
 

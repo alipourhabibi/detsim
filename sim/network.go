@@ -265,6 +265,21 @@ func (n *Network) healAll() {
 	for i := range n.links {
 		for j := range n.links[i] {
 			l := &n.links[i][j]
+			l.lossPPM = n.config.LossPPM
+			l.dupPPM = n.config.DuplicationPPM
+			if l.reordering {
+				l.lastArrival = 0
+			}
+			l.reordering = n.config.IsReordering
+		}
+	}
+}
+
+func (n *Network) perfectify() {
+	n.rules = n.rules[:0]
+	for i := range n.links {
+		for j := range n.links[i] {
+			l := &n.links[i][j]
 			l.lossPPM = 0
 			l.dupPPM = 0
 			if l.reordering {
@@ -275,10 +290,13 @@ func (n *Network) healAll() {
 	}
 }
 
-func (n *Network) resetConnection(from, to int) {
-	l := n.link(from, to)
-	l.epoch++
-	l.lastArrival = 0
+// resetConnection models a TCP reset. A connection carries both directions,
+// so both links lose everything in flight and restart FIFO ordering from here.
+func (n *Network) resetConnection(a, b int) {
+	for _, l := range []*link{n.link(a, b), n.link(b, a)} {
+		l.epoch++
+		l.lastArrival = 0
+	}
 }
 
 func (n *Network) setLoss(from, to int, ppm uint32) {

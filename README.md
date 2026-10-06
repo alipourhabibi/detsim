@@ -159,6 +159,12 @@ Put every field that matters in `HashInto`. Put the same fields in `Equal`. If
 they do not match, the hash says two runs are different and the compare tool
 says they are the same, and you cannot trust either one.
 
+A message must not change after you send it. The simulator does not copy it.
+If you change a slice or a map inside it after `Send`, the other node sees the
+change, which a real network never does. The simulator hashes the message at
+send and again at delivery, and stops the run with `ErrMessageChanged` if they
+differ.
+
 There are some example protocols in the repo, all with no `sim` import:
 `protocol/pingpong` and `protocol/maslave`.
 
@@ -306,8 +312,11 @@ plan := &sim.Plan{Faults: []sim.Scheduled{
 	{At: 1000, Fault: sim.NewCrashFault(1, false, 500)},
 	{At: 2000, Fault: sim.NewPartitionFault([]int{0}, []int{1, 2})},
 }}
-plan.Apply(s)
+s.StartWith(plan) // instead of s.Start()
 ```
+
+`StartWith` applies the plan, then starts. The order matters: buggify must be on
+before the first `OnRestart`. `plan.Apply(s)` after `Start` panics.
 
 This is better than calling `ScheduleFault` one by one. The plan prints itself
 when a test fails, so you can see what happened, and `Shrink` can make it
@@ -326,7 +335,7 @@ plan := sim.GeneratePlan(sim.PlanConfig{
 	Weights: sim.DefaultWeights(),
 }, nodes, r)
 
-plan.Apply(s)
+s.StartWith(plan)
 ```
 
 The whole plan is made before the run starts, not while it runs. This matters
@@ -353,9 +362,18 @@ if f != nil {
 
 `Sweep` tries every seed from 1 to 10000 and stops at the first failure.
 
+`build` gives back a `Sim` that is **not started**. `Sweep` applies the plan and
+starts it, so the order is always right. It also keeps no trace while sweeping,
+only the hash, because a sweep only needs pass or fail. Then it runs the lowest
+failing seed once more with the trace your `Config` asks for, so `f.Sim` has the
+whole story. If `build` calls `Start`, `Sweep` panics.
+
 `Shrink` then makes the plan smaller. It removes one fault, runs again, and
 keeps the removal if it still fails. A failure with 47 faults is too hard to
 read. The same failure with 3 faults is usually clear.
+
+After that it halves the numbers in each fault while it still fails, so
+`downtime: 487` usually ends as `downtime: 1`.
 
 `Shrink` must use the same seed as the failure. With a different seed you are
 only asking "does it fail at all", not "does this fault matter".
@@ -373,8 +391,19 @@ go run ./cmd/lockcheck -seeds 1..10000    sweep further
 go run ./cmd/lockcheck -seed 1            replay one seed
 go run ./cmd/lockcheck -seed 1 -trace all show the whole trace, not just storage
 go run ./cmd/lockcheck -mermaid           print a diagram to paste in an issue
+go run ./cmd/lockcheck -corpus bad.txt    save failing seeds and their plans
+go run ./cmd/lockcheck -corpus bad.txt -rerun   run only the saved ones again
 go run ./cmd/lockcheck -out report.txt    write the report to a file
 ```
+
+Each seed gets its own network and fault mix (swarm testing). Some seeds get a
+calm network, some get a storm. The sweep also prints how many distinct global
+states it saw. If that number does not grow with more seeds, the sweep is
+running the same few situations again and again.
+
+The corpus saves the shrunk plan as text under each seed, not only the seed. A
+seed means a new plan as soon as the plan code changes. The saved plan keeps
+meaning the same faults.
 
 Read [READING-TRACES.md](READING-TRACES.md) to learn how to read the traces and
 find the bug in this/your protocol.
@@ -416,16 +445,14 @@ thinks it is the leader.
 | `NewDropLinkFault(from, to, ppm)` | Sets a loss rate on one direction of one link. |
 | `NewDuplicateLinkFault(from, to, ppm)` | Same, for duplicate messages. |
 | `NewResetConnectionFault(from, to)` | Resets the link, like a TCP reset. |
-| `NewHealFault(id)` | Removes one rule. Pass 0 to remove all of them. |
+| `NewHealFault(id)` | Removes one rule. Pass 0 to remove all of them and put every link back to the `NetworkConfig`. |
 
 A scheduled partition cannot give you back its rule id, so you can only remove
-it with `NewHealFault(0)`. If you need to remove one rule by itself, do it
-directly instead:
+it with `NewHealFault(0)`. Rule ids count up from 1 in the order the rules are
+made, so if you know the order you can also heal one by its number.
 
-```go
-id := s.Partition([]int{0, 1}, []int{2, 3})
-s.Heal(id)
-```
+`NewHealFault(0)` goes back to the config, not to a perfect network. So you can
+partition, heal and partition again, and the normal loss is still there.
 
 Rules are checked in order and **the last one that matches wins**. So an allow
 rule after a block rule makes a hole in the block. This is how you build a node
@@ -460,6 +487,17 @@ in production. Choose on purpose.
 An empty `NetworkConfig` gives a perfect network: no delay, no loss, in order.
 Start there. If your protocol breaks on a perfect network, the bug is in your
 protocol.
+
+## Clock skew
+
+```go
+sim.Config{MaxClockSkew: 50}
+```
+
+Each node gets a fixed offset from sim time, between -50 and +50ms, drawn from
+the seed. `ctx.Now()` shows the node's own time. Timers are not affected, they
+count from now. Leases and timeouts that compare times across nodes are what
+this breaks. 0, the default, means no skew.
 
 ## Buggify
 
@@ -569,6 +607,12 @@ They all return `ErrMaxEvents` if you hit the `MaxEvents` cap. Always set that
 cap. If a node sets a timer with 0 delay from inside its own timer callback,
 the run never ends, and the cap turns a hang into a test failure.
 
+A panic inside your handler does not kill the process. The run stops and
+returns an error that wraps `ErrHandlerPanic`, with the time and the event. So
+a panic gets a seed and a plan like any other failure, and it shrinks.
+
+`RunHealed` gives a perfect network: no rules, no loss, no duplication, FIFO.
+
 `RunHealed` is for checking that things get better. Some things cannot be
 proved wrong at any single moment. "A leader is chosen" is one: no leader yet
 does not mean no leader ever. So instead you remove all the faults, wake
@@ -630,10 +674,13 @@ check on the history is a check a real user could do.
 Your harness records operations:
 
 ```go
-s.History().Invoke(ctx.Now(), clientID, "acquire", attempt)
+s.History().Invoke(s.Now(), clientID, "acquire", attempt)
 // later
-s.History().Complete(ctx.Now(), clientID, attempt)
+s.History().Complete(s.Now(), clientID, attempt)
 ```
+
+Use `s.Now()`, the sim time, not `ctx.Now()`. With clock skew on, every node has
+its own clock, and the history needs one clock for everyone.
 
 Every operation ends `ok` or `unknown`. Unknown means the client never got an
 answer. It is not a failure: the operation may have happened on the server and
@@ -695,6 +742,7 @@ s.Get(id, key)    // read the disk directly
 s.Keys(id)
 s.Handler(id)     // your node, for checks. nil while crashed
 s.Trace()
+s.GlobalStates()  // hash of every global state the run passed through
 ```
 
 ### Trace levels

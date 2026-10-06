@@ -20,6 +20,9 @@ type Plan struct {
 }
 
 func (p *Plan) Apply(s *Sim) {
+	if s.started {
+		panic("sim: Plan.Apply after Start: buggify would miss the first OnRestart")
+	}
 	s.setBuggify(p.Buggify)
 	for _, f := range p.Faults {
 		s.ScheduleFault(f.At, f.Fault)

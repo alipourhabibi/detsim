@@ -371,14 +371,14 @@ func TestNonDenseNodeIDs(t *testing.T) {
 		seen[d] = id
 	}
 
-	s.Partition([]int{5}, []int{7, 9})
+	s.network.partition([]int{5}, []int{7, 9})
 	if s.network.reachable(5, 7, s.Now()) {
 		t.Error("partition did not block 5->7")
 	}
 	if !s.network.reachable(7, 9, s.Now()) {
 		t.Error("partition wrongly blocked 7->9")
 	}
-	s.Heal(0)
+	s.network.heal(0)
 	if !s.network.reachable(5, 7, s.Now()) {
 		t.Error("heal did not restore 5->7")
 	}

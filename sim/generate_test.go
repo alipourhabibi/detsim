@@ -309,8 +309,7 @@ func TestPlanReplayIsStable(t *testing.T) {
 			func(id int) Handler {
 				return &pingOnTimer{peer: (id + 1) % len(testNodes)}
 			})
-		s.Start()
-		p.Apply(s)
+		s.StartWith(p)
 		if err := s.RunUntil(10_000); err != nil {
 			t.Fatal(err)
 		}

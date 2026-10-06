@@ -36,6 +36,8 @@ type Event struct {
 	Parent uint64 // Seq of the event that caused this one; 0 if root
 
 	Epoch uint64 // destination's epoch at schedule time; stale => discard
+	Conn  uint64 // EvDeliver only: link epoch at send time; stale => discard
+	Sum   uint64 // EvDeliver only: message hash at send time; changed => error
 	Token uint64 // EvTimer only: the timer's token at schedule time
 	Name  string // EvTimer only: timer name
 

@@ -50,8 +50,7 @@ func TestPlanApplySchedulesEverything(t *testing.T) {
 	}}
 
 	s := New(testConfig(1), []int{0, 1}, noop)
-	s.Start()
-	p.Apply(s)
+	s.StartWith(p)
 
 	if err := s.RunUntil(1000); err != nil {
 		t.Fatal(err)

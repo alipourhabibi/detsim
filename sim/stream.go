@@ -23,6 +23,8 @@ const (
 	StreamDup
 	StreamFault
 	StreamWorkload
+	StreamClock
+	StreamSwarm // for the caller: draws a different PlanConfig per seed
 	// next concern stream goes here
 )
 
@@ -40,10 +42,11 @@ func (n *nodeStream) Int64N(x int64) int64 {
 type streams struct {
 	seed uint64
 
-	delay *rand.Rand
-	loss  *rand.Rand
-	dup   *rand.Rand
-	fault *rand.Rand
+	delay    *rand.Rand
+	loss     *rand.Rand
+	dup      *rand.Rand
+	fault    *rand.Rand
+	workload *rand.Rand
 
 	// node is indexed by dense node index, not node id.
 	node []*nodeStream
@@ -56,7 +59,9 @@ func newStreams(seed uint64, n int) *streams {
 		loss:  NewStream(seed, StreamLoss),
 		dup:   NewStream(seed, StreamDup),
 		fault: NewStream(seed, StreamFault),
-		node:  make([]*nodeStream, n),
+
+		workload: NewStream(seed, StreamWorkload),
+		node:     make([]*nodeStream, n),
 	}
 	for i := range s.node {
 		s.node[i] = &nodeStream{r: NewStream(seed, nodeStreamID(i, 0))}

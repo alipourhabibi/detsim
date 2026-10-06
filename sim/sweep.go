@@ -26,11 +26,17 @@ func (f *Failure[T]) String() string {
 // Lowest, not first: with several workers, "first" is whichever core finished,
 // so the same sweep would give a different answer each run. The full list is
 // for the saving the failed one.
+//
+// build must return a Sim that is not started. Sweep starts it, so the caller
+// cannot get two things wrong: the plan is applied before Start, and no trace
+// is kept while sweeping. Only pass or fail matters there. The lowest failing
+// seed runs once more with the trace the caller's Config asks for, so
+// Failure.Sim has the whole story.
 func Sweep[T any](
 	from uint64,
 	to uint64,
 	gen func(seed uint64, r Rand) *Plan,
-	build func(seed uint64, p *Plan) (*Sim, T),
+	build func(seed uint64) (*Sim, T),
 	check func(s *Sim, ctx T) error,
 ) (*Failure[T], []SeedFailure) {
 
@@ -59,7 +65,12 @@ func Sweep[T any](
 			for seed := range seeds {
 				r := NewStream(seed, StreamFault)
 				plan := gen(seed, r)
-				s, ctx := build(seed, plan)
+				s, ctx := build(seed)
+				if s.started {
+					panic("sim: Sweep build must return a Sim that is not started")
+				}
+				s.trace = NewTrace(s.cfg.TraceLevel, 0) // hash only
+				s.StartWith(plan)
 				if err := check(s, ctx); err != nil {
 					fails <- &Failure[T]{
 						Seed: seed,
@@ -84,9 +95,19 @@ func Sweep[T any](
 		allSeeds = append(allSeeds, SeedFailure{
 			Seed: f.Seed,
 			Err:  f.Err,
+			Plan: f.Plan,
 		})
 		if best == nil || f.Seed < best.Seed {
 			best = f
+		}
+	}
+
+	if best != nil {
+		// Again, with the trace kept, for the report.
+		best.Sim, best.Ctx = build(best.Seed)
+		best.Sim.StartWith(best.Plan)
+		if err := check(best.Sim, best.Ctx); err != nil {
+			best.Err = err
 		}
 	}
 	return best, allSeeds

@@ -62,7 +62,7 @@ func TestPartitionDoesNotShiftLossStream(t *testing.T) {
 			})
 		s.Start()
 		if partition {
-			s.Partition([]int{0}, []int{1})
+			s.network.partition([]int{0}, []int{1})
 		}
 		if err := s.RunUntil(200); err != nil {
 			t.Fatal(err)
