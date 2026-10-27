@@ -32,14 +32,12 @@ type Handler interface {
 A factory builds your node. The simulator calls it again after every restart:
 
 ```go
-type NodeFactory func(id int, deps Deps) Handler
-
-type Deps struct {
-	Id    int
-	Store Store
-	Rand  Rand
-}
+type NodeFactory func(id int) Handler
 ```
+
+The node gets its disk and its randomness from the `Ctx` in each callback:
+`ctx.Get`, `ctx.Put` and `ctx.Sync` for the disk, `ctx.Rand()` for random
+numbers. Both are seeded per node, so a node never needs them at build time.
 
 ### The Ctx is your node's disk and network for this turn
 
@@ -244,7 +242,7 @@ func Build(cfg sim.Config, a, b int) (*sim.Sim, map[int]*driver) {
 	drivers := map[int]*driver{}
 
 	factory := func(peer int) sim.NodeFactory {
-		return func(id int, deps sim.Deps) sim.Handler {
+		return func(id int) sim.Handler {
 			turn := &sim.Turn{}
 			d := &driver{
 				node: pingpong.New(id, peer, &transport{turn}),
@@ -333,7 +331,7 @@ plan := sim.GeneratePlan(sim.PlanConfig{
 	MeanGap: 200,
 	MaxDown: 1, // keep enough nodes alive for a quorum
 	Weights: sim.DefaultWeights(),
-}, nodes, r)
+}, nodes, seed, r)
 
 s.StartWith(plan)
 ```
@@ -352,16 +350,25 @@ Heal: 1}` means three crashes for every heal.
 ### Trying many seeds
 
 ```go
-f := sim.Sweep(1, 10_000, gen, build, check)
+f, all := sim.Sweep(1, 10_001, gen, build, check)
 if f != nil {
-	f.Plan = sim.Shrink(f.Plan, func(p *sim.Plan) bool {
-		return check(build(f.Seed, p)) != nil
+	small := sim.Shrink(f.Plan, func(p *sim.Plan) bool {
+		s, c := build(f.Seed)
+		s.StartWith(p)
+		return check(s, c) != nil
 	})
-	t.Fatal(f) // prints the seed and the small plan
+	t.Fatalf("seed %d: %v\nplan:\n%s", f.Seed, f.Err, small)
 }
+_ = all // every failing seed with its plan, for SaveCorpus
 ```
 
-`Sweep` tries every seed from 1 to 10000 and stops at the first failure.
+`Sweep` runs every seed from 1 to 10000. The end is not included, so the
+range above is `1, 10_001`. It runs all of them, it does not stop at the first
+failure. It returns the lowest failing seed, and every failing seed sorted.
+
+If the lowest failing seed passes when it runs again, `f.Err` wraps
+`sim.ErrNotReproduced`. That means the run is not deterministic, and shrinking
+it makes no sense.
 
 `build` gives back a `Sim` that is **not started**. `Sweep` applies the plan and
 starts it, so the order is always right. It also keeps no trace while sweeping,
@@ -385,17 +392,23 @@ You can use the `cmd/lockcheck` to test the traces yourself.
 
 It uses a buggy lock server and clients protocol which will fail via the sim and its harness.
 
+The bug is behind a buggify point, so build with `-tags simfaults`. Without
+the tag it is compiled out, and the sweep should come back clean.
+
 Run it:
 ```
-go run ./cmd/lockcheck                    sweep 1..500, show the first failure
-go run ./cmd/lockcheck -seeds 1..10000    sweep further
-go run ./cmd/lockcheck -seed 1            replay one seed
-go run ./cmd/lockcheck -seed 1 -trace all show the whole trace, not just storage
-go run ./cmd/lockcheck -mermaid           print a diagram to paste in an issue
-go run ./cmd/lockcheck -corpus bad.txt    save failing seeds and their plans
-go run ./cmd/lockcheck -corpus bad.txt -rerun   run only the saved ones again
-go run ./cmd/lockcheck -out report.txt    write the report to a file
+go run -tags simfaults ./cmd/lockcheck                   sweep 1..500, show the lowest failing seed
+go run -tags simfaults ./cmd/lockcheck -seeds 1..10000   sweep further, both ends included
+go run -tags simfaults ./cmd/lockcheck -seed 1           replay one seed
+go run -tags simfaults ./cmd/lockcheck -seed 1 -trace all   show the whole trace, not just storage
+go run -tags simfaults ./cmd/lockcheck -mermaid          print a diagram to paste in an issue
+go run -tags simfaults ./cmd/lockcheck -corpus bad.txt   save failing seeds and their plans
+go run -tags simfaults ./cmd/lockcheck -corpus bad.txt -rerun   run only the saved ones again
+go run -tags simfaults ./cmd/lockcheck -out report.txt   write the report to a file
 ```
+
+It exits 0 when clean, 1 on a violation, 2 when a failure does not reproduce,
+and 3 on bad flags or a file it can't read or write.
 
 Each seed gets its own network and fault mix (swarm testing). Some seeds get a
 calm network, some get a storm. The sweep also prints how many distinct global
@@ -414,7 +427,7 @@ find the bug in this/your protocol.
 A fault is a value that can be run now or scheduled for later.
 
 ```go
-s.InjectFault(f)          // now
+s.InjectFault(f)          // now, after the events already queued for now
 s.ScheduleFault(at, f)    // later
 ```
 
@@ -455,10 +468,11 @@ made, so if you know the order you can also heal one by its number.
 `NewHealFault(0)` goes back to the config, not to a perfect network. So you can
 partition, heal and partition again, and the normal loss is still there.
 
-Rules are checked in order and **the last one that matches wins**. So an allow
-rule after a block rule makes a hole in the block. This is how you build a node
-that can reach both sides of a split(Bridge node). Those cases find the worst
-bugs, the ones where two nodes both think they are the leader.
+Rules are checked in order and **the last one that matches wins**. Every
+fault today adds a block rule, so the order only matters once allow rules
+exist. There is no public fault for an allow rule or a one-way block yet, so a
+bridge node (one that reaches both sides of a split) can't be built from the
+outside.
 
 The simulator checks twice if a message can pass: once when you send it, once
 when it arrives. A partition that appears while the message is flying still
@@ -476,7 +490,8 @@ sim.NetworkConfig{
 ```
 
 `Spread` is the **width** of the random part, not the top. Messages take
-between `Base` and `Base + Spread`. So the example above gives 20 to 120ms.
+between `Base` and `Base + Spread`, not counting the top. So the example above
+gives 20 to 119ms.
 
 `DelayConstant` uses `Base` only and ignores `Spread`.
 
@@ -495,7 +510,7 @@ protocol.
 sim.Config{MaxClockSkew: 50}
 ```
 
-Each node gets a fixed offset from sim time, between -50 and +50ms, drawn from
+Each node gets a fixed offset from sim time, between -50 and +49ms, drawn from
 the seed. `ctx.Now()` shows the node's own time. Timers are not affected, they
 count from now. Leases and timeouts that compare times across nodes are what
 this breaks. 0, the default, means no skew.
@@ -767,12 +782,17 @@ To put your own state in the hash and show what it believes, add these methods
 to your driver, not to your protocol node:
 
 ```go
-func (d *driver) StateDigest(w io.Writer) { /* write your fields */ }
-func (d *driver) StateString() string { /* return what your node believes. */ }
+func (d *driver) StateDigest(ctx *sim.Ctx, w io.Writer) { /* write your fields */ }
+func (d *driver) StateString(ctx *sim.Ctx) string { /* return what your node believes. */ }
 ```
 
-Both run between events, so they can only read plain fields. They cannot call
-`Send`, `Get`, `Put` or the timers: there is no `Ctx` there.
+Both run between events, with a read-only `Ctx`. They can read the disk with
+`ctx.Get` and `ctx.Keys`. `Send`, `Put`, the timers, `Rand` and `Buggify`
+panic there: these only run when tracing is on, so anything they change would
+make the trace level change the run.
+
+At `TraceHashEventsAndState` every node must have `StateDigest`, or the sim
+panics at start. Without `StateString` there are no `state` lines.
 
 The simulator writes a `state` line only when `StateString` changes, so you get
 the moments a node changed its mind, not one line per event.

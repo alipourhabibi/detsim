@@ -93,9 +93,9 @@ func (d *ClientDriver) StateDigest(_ *sim.Ctx, w io.Writer) {
 
 func (d *ClientDriver) StateString(_ *sim.Ctx) string {
 	if d.node.Holding {
-		return fmt.Sprintf("HOLDING attempt=%d", d.node.Attempt())
+		return "HOLDING attempt=" + lockserver.AttemptString(d.node.Attempt())
 	}
-	return fmt.Sprintf("waiting attempt=%d", d.node.Attempt())
+	return "waiting attempt=" + lockserver.AttemptString(d.node.Attempt())
 }
 
 func (d *ServerDriver) Node() *lockserver.Server {
@@ -122,7 +122,7 @@ func (d *ServerDriver) OnMessage(ctx *sim.Ctx, from int, msg sim.Message) {
 	case lockserver.Acquire:
 		d.node.OnAcquire(from, m)
 	case lockserver.Release:
-		d.node.OnRelease(from)
+		d.node.OnRelease(from, m)
 	default:
 		panic(fmt.Sprintf("lockserver: server got %T", msg))
 	}
@@ -205,6 +205,11 @@ type Cluster struct {
 func (c *Cluster) Holders() []int {
 	var out []int
 	for _, id := range c.Clients { // sorted list, not a map: order must be stable
+		// a crashed client's driver is kept until restart, but nobody is
+		// inside the critical section on a dead node
+		if c.Sim.Status(id) == sim.Crashed {
+			continue
+		}
 		d := c.clients[id]
 		if d != nil && d.node.Holding {
 			out = append(out, id)
@@ -254,7 +259,7 @@ func Build(cfg sim.Config, clientCount int, retryMs, holdMs int64) *Cluster {
 		turn := &sim.Turn{}
 		d := &ClientDriver{
 			node: lockserver.NewClient(id, serverID, retryMs, holdMs,
-				&transport{turn}, &timers{turn, c.Sim.Workload()}, &injector{turn}),
+				&transport{turn}, &timers{turn, c.Sim.Workload()}, &storage{turn}, &injector{turn}),
 			turn:    turn,
 			history: c.Sim.History(),
 			sim:     c.Sim,
@@ -293,11 +298,13 @@ func (c *Cluster) CheckHistory() error {
 	// A grant is a leak only if the client had time to release and did not
 	cutoff := now - sim.Time(c.leaseMs)
 
-	for _, s := range sim.Unclosed(spans, now) {
+	for _, s := range sim.Unclosed(spans) {
 		if s.From > cutoff {
 			continue // OK as still within its lease when the run ended
 		}
-		if c.Sim.Status(s.Client) != sim.Crashed {
+		// a paused client can't release, its lease timer is held back
+		// with it. Crashed ones are closed by the crash already.
+		if c.Sim.Status(s.Client) == sim.Healthy {
 			return fmt.Errorf("client %d was granted the lock at t=%d (op%d) "+
 				"and never gave it back", s.Client, s.From, s.Op.ID)
 		}

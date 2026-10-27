@@ -6,7 +6,8 @@
 // a time. That is the whole contract, and it is the reason the service exists.
 //
 // The server keeps the lock owner on disk, because it must survive a power
-// loss. There is a bug in how it does that. Look for the word BUG below.
+// loss. There is a bug in how it does that, behind the BuggifySkipSync mark in
+// recordOwner. Build with -tags simfaults to turn it on.
 package lockserver
 
 import (
@@ -43,19 +44,28 @@ type Granted struct {
 	Attempt uint64
 }
 
-// Release gives the lock back.
-type Release struct{}
+// Release gives the lock back. Attempt is the one that was granted, so the
+// server can tell it from a release of an older grant that arrives late.
+type Release struct {
+	Attempt uint64
+}
+
+// AttemptString prints an attempt as incarnation.count, like 2.5, which is
+// easier to read in a trace than the raw incarnation<<32 | count.
+func AttemptString(a uint64) string {
+	return fmt.Sprintf("%d.%d", a>>32, a&(1<<32-1))
+}
 
 func (m Acquire) String() string {
-	return fmt.Sprintf("Acquire#%d", m.Attempt)
+	return "Acquire#" + AttemptString(m.Attempt)
 }
 
 func (m Granted) String() string {
-	return fmt.Sprintf("Granted#%d", m.Attempt)
+	return "Granted#" + AttemptString(m.Attempt)
 }
 
 func (m Release) String() string {
-	return "Release"
+	return "Release#" + AttemptString(m.Attempt)
 }
 
 type Msg interface {
@@ -89,12 +99,12 @@ func (m Granted) Equal(o any) bool {
 }
 
 func (m Release) HashInto(w io.Writer) {
-	writeTagged(w, 'r', 0)
+	writeTagged(w, 'r', m.Attempt)
 }
 
 func (m Release) Equal(o any) bool {
-	_, ok := o.(Release)
-	return ok
+	x, ok := o.(Release)
+	return ok && x == m
 }
 
 type Transport interface {
@@ -127,7 +137,10 @@ type Timers interface {
 	CancelTimer(name string)
 }
 
-const keyOwner = "lock.owner"
+const (
+	keyOwner       = "lock.owner"         // owner id, then the attempt it was granted
+	keyIncarnation = "client.incarnation" // how many times this client started
+)
 
 // Server is the lock manager. The owner record is durable state: it is the only
 // thing standing between a reboot and two clients in the critical section at
@@ -155,24 +168,31 @@ func (s *Server) Start() {
 }
 
 func (s *Server) Owner() int {
-	v, ok := s.storage.Get(keyOwner)
-	if !ok {
-		return NoHolder
-	}
-	if len(v) != 8 {
-		panic(fmt.Sprintf("lockserver: owner record is %d bytes, want 8", len(v)))
-	}
-
-	id := int(int64(binary.LittleEndian.Uint64(v)))
-	if id < NoHolder {
-		panic(fmt.Sprintf("lockserver: owner record is %d, which is no client", id))
-	}
+	id, _ := s.owner()
 	return id
 }
 
-func (s *Server) recordOwner(id int) {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(int64(id)))
+// owner reads the owner record: who holds the lock, and for which attempt.
+func (s *Server) owner() (int, uint64) {
+	v, ok := s.storage.Get(keyOwner)
+	if !ok {
+		return NoHolder, 0
+	}
+	if len(v) != 16 {
+		panic(fmt.Sprintf("lockserver: owner record is %d bytes, want 16", len(v)))
+	}
+
+	id := int(int64(binary.LittleEndian.Uint64(v[:8])))
+	if id < NoHolder {
+		panic(fmt.Sprintf("lockserver: owner record is %d, which is no client", id))
+	}
+	return id, binary.LittleEndian.Uint64(v[8:])
+}
+
+func (s *Server) recordOwner(id int, attempt uint64) {
+	var buf [16]byte
+	binary.LittleEndian.PutUint64(buf[:8], uint64(int64(id)))
+	binary.LittleEndian.PutUint64(buf[8:], attempt)
 	s.storage.Put(keyOwner, buf[:])
 
 	s.LastGranted = id
@@ -195,22 +215,27 @@ func (s *Server) OnAcquire(from int, m Acquire) {
 	if owner != NoHolder && owner != from {
 		return // held by someone else. The client backs off and retries.
 	}
-	s.recordOwner(from)
+	s.recordOwner(from, m.Attempt)
 	s.transport.Send(from, Granted{Attempt: m.Attempt})
 }
 
-func (s *Server) OnRelease(from int) {
-	if s.Owner() != from {
-		return // not the owner, so this is a stale release. Ignore it.
+func (s *Server) OnRelease(from int, m Release) {
+	owner, attempt := s.owner()
+	if owner != from || attempt != m.Attempt {
+		// Not the owner, or a release of an older grant to the same client
+		// that arrived after a newer Acquire. Ignore it, or the lock would
+		// be free while the client still holds the newer grant.
+		return
 	}
-	s.recordOwner(NoHolder)
+	s.recordOwner(NoHolder, 0)
 }
 
 // Client acquires the lock, holds it for a fixed lease, releases, and starts
 // over.
 //
 // Every field here is soft state. After a crash the client forgets it ever held
-// the lock and starts from scratch.
+// the lock and starts from scratch. Only the incarnation count is on disk, so
+// attempt numbers never repeat across restarts.
 type Client struct {
 	Id     int
 	Server int
@@ -227,6 +252,7 @@ type Client struct {
 
 	transport Transport
 	timers    Timers
+	storage   Storage
 
 	faults faults.Injector
 }
@@ -235,7 +261,7 @@ func (c Client) Attempt() uint64 {
 	return c.attempt
 }
 
-func NewClient(id, server int, retryMs, holdMs int64, t Transport, tm Timers, f faults.Injector) *Client {
+func NewClient(id, server int, retryMs, holdMs int64, t Transport, tm Timers, st Storage, f faults.Injector) *Client {
 	if f == nil {
 		f = faults.NoOp{}
 	}
@@ -246,12 +272,28 @@ func NewClient(id, server int, retryMs, holdMs int64, t Transport, tm Timers, f 
 		HoldMs:    holdMs,
 		transport: t,
 		timers:    tm,
+		storage:   st,
 		faults:    f,
 	}
 }
 
 func (c *Client) Start() {
 	c.Holding = false
+
+	// Attempts start at incarnation<<32. Without this a restarted client
+	// counts from 1 again, and a late Granted#1 from before the crash would
+	// match the new Acquire#1.
+	var inc uint64
+	if v, ok := c.storage.Get(keyIncarnation); ok {
+		inc = binary.LittleEndian.Uint64(v)
+	}
+	inc++
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], inc)
+	c.storage.Put(keyIncarnation, buf[:])
+	c.storage.Sync() // before any Acquire with the new numbers goes out
+	c.attempt = inc << 32
+
 	c.acquire()
 }
 
@@ -302,7 +344,7 @@ func (c *Client) OnTimer(name string) {
 			return
 		}
 
-		c.transport.Send(c.Server, Release{})
+		c.transport.Send(c.Server, Release{Attempt: c.attempt})
 		c.timers.SetTimer("retry", c.RetryMs)
 	}
 }

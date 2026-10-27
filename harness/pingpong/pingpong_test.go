@@ -21,11 +21,12 @@ func TestDeterministicSameProcess(t *testing.T) {
 			TraceLevel:    sim.TraceHashEventsAndState,
 			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 		}
-		pa, pb, s := NewPingPong(config, 0, 1, 200)
+		s := NewPingPong(config, 0, 1, 200)
+		s.Start()
 		if err := s.RunUntilQuiescent(); err != nil {
 			t.Fatalf("run failed: %v", err)
 		}
-		return s.Trace().Sum(), pa.node.Count, pb.node.Count
+		return s.Trace().Sum(), Node(s, 0).Rounds, Node(s, 1).Rounds
 	}
 
 	for _, seed := range []uint64{1, 42, 999} {
@@ -61,6 +62,7 @@ func TestDeterministicFreshProcess(t *testing.T) {
 		return strings.TrimSpace(stdout.String())
 	}
 
+	got := map[string]bool{}
 	for _, seed := range []uint64{1, 42, 999} {
 		first := run(seed)
 		second := run(seed)
@@ -68,6 +70,15 @@ func TestDeterministicFreshProcess(t *testing.T) {
 			t.Errorf("seed %d: fresh-process mismatch\n  run 1: %s\n  run 2: %s",
 				seed, first, second)
 		}
+		// the FNV start value means nothing was hashed
+		if strings.HasPrefix(first, "cbf29ce484222325") {
+			t.Fatalf("seed %d: hash is the FNV start value, simcheck hashes nothing", seed)
+		}
+		got[first] = true
+	}
+	// equal output for every seed means the check compares a constant
+	if len(got) < 2 {
+		t.Fatal("every seed printed the same hash")
 	}
 }
 
@@ -80,7 +91,8 @@ func TestSeedsDiverge(t *testing.T) {
 			TraceLevel:    sim.TraceHashEventsAndState,
 			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 		}
-		_, _, s := NewPingPong(config, 0, 1, 200)
+		s := NewPingPong(config, 0, 1, 200)
+		s.Start()
 		if err := s.RunUntilQuiescent(); err != nil {
 			t.Fatalf("run failed: %v", err)
 		}
@@ -109,8 +121,11 @@ func TestSeedsDiverge(t *testing.T) {
 	}
 }
 
-// ~1h simulated, <1s wall
+// ~1h simulated, a few seconds wall
 func TestVirtualTimeIsFree(t *testing.T) {
+	if raceOn {
+		t.Skip("wall time means nothing under -race, it is 5-10x slower")
+	}
 	const simHour = sim.Time(60 * 60 * 1000)
 	const rounds = 60_000 // ~60ms per round ≈ one simulated hour
 
@@ -120,7 +135,8 @@ func TestVirtualTimeIsFree(t *testing.T) {
 		TraceLevel:    sim.TraceHashEventsAndState,
 		NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 	}
-	_, _, s := NewPingPong(config, 0, 1, rounds)
+	s := NewPingPong(config, 0, 1, rounds)
+	s.Start()
 
 	start := time.Now()
 	if err := s.RunUntil(simHour); err != nil {
@@ -131,7 +147,8 @@ func TestVirtualTimeIsFree(t *testing.T) {
 	if s.Now() != simHour {
 		t.Errorf("clock at %d, want %d", s.Now(), simHour)
 	}
-	if elapsed > time.Second {
+	// about 1s on a normal machine; the margin is for a busy CI box
+	if elapsed > 5*time.Second {
 		t.Fatalf("simulated hour took %v wall time", elapsed)
 	}
 	t.Logf("%d events over %d ms simulated in %v", s.EventCount(), simHour, elapsed)

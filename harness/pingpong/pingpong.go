@@ -2,6 +2,7 @@ package pingpong
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"github.com/alipourhabibi/detsim/protocol/pingpong"
@@ -28,7 +29,7 @@ type driver struct {
 func (d *driver) StateDigest(_ *sim.Ctx, w io.Writer) {
 	var buf [17]byte
 	buf[0] = 'p'
-	binary.LittleEndian.PutUint64(buf[1:9], d.node.Count)
+	binary.LittleEndian.PutUint64(buf[1:9], d.node.Rounds) // Count is config, Rounds is state
 	binary.LittleEndian.PutUint64(buf[9:17], d.node.Ticks)
 	w.Write(buf[:])
 }
@@ -54,7 +55,7 @@ func (d *driver) OnMessage(ctx *sim.Ctx, from int, msg sim.Message) {
 
 	ballMsg, ok := msg.(pingpong.Ball)
 	if !ok {
-		panic("harness: msg is not of type sim.Message")
+		panic(fmt.Sprintf("harness: got %T, want pingpong.Ball", msg))
 	}
 
 	if ballMsg.IsPing {
@@ -64,29 +65,27 @@ func (d *driver) OnMessage(ctx *sim.Ctx, from int, msg sim.Message) {
 	}
 }
 
-func (d *driver) Node() *pingpong.PingPong {
-	return d.node
+// Node returns the protocol state of node id. Call it again after a restart,
+// the old one is gone.
+func Node(s *sim.Sim, id int) *pingpong.PingPong {
+	return s.Handler(id).(*driver).node
 }
 
-func NewPingPong(config sim.Config, a, b int, rounds uint64) (*driver, *driver, *sim.Sim) {
-	drivers := map[int]*driver{}
+// NewPingPong builds the sim but does not start it, so the caller can add
+// invariants or use StartWith first.
+func NewPingPong(config sim.Config, a, b int, rounds uint64) *sim.Sim {
 	newNode := func(peer int, rounds uint64, starter bool) sim.NodeFactory {
 		return func(id int) sim.Handler {
 			tn := &sim.Turn{}
-			nd := &driver{
+			return &driver{
 				node: pingpong.New(id, peer, rounds, 2*rounds, &transport{tn}, starter, Interval),
 				turn: tn,
 			}
-			drivers[id] = nd
-			return nd
 		}
 	}
 
-	s := sim.New(config, []int{a, b}, nil,
+	return sim.New(config, []int{a, b}, nil,
 		sim.WithFactory(a, newNode(b, rounds, true)),
 		sim.WithFactory(b, newNode(a, rounds, false)),
 	)
-	s.Start()
-
-	return drivers[a], drivers[b], s
 }

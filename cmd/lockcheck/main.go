@@ -1,7 +1,7 @@
 // Command lockcheck hunts for mutual exclusion violations in the lockserver.
 //
-//	go run ./cmd/lockcheck                          sweep seeds 1..500
-//	go run ./cmd/lockcheck -seeds 1..10000          sweep further
+//	go run -tags simfaults ./cmd/lockcheck              sweep seeds 1..500
+//	go run -tags simfaults ./cmd/lockcheck -seeds 1..10000   sweep further
 //	go run ./cmd/lockcheck -seed 1                  replay one seed
 //	go run ./cmd/lockcheck -seed 1 -trace all       show the whole trace
 //	go run ./cmd/lockcheck -seed 1 -trace history   what the clients saw
@@ -9,8 +9,15 @@
 //	go run ./cmd/lockcheck -mermaid                 a diagram to paste in an issue
 //	go run ./cmd/lockcheck -out report.txt          write the report to a file
 //
-// Exits 1 when it finds a violation, so it works in a shell loop. Exit 2 means
-// the run was not reproducible, which makes every other result untrustworthy.
+// Without -tags simfaults the buggify points are compiled out, so the planted
+// skip-sync bug can't fire.
+//
+// Exit codes:
+//
+//	0  no violation
+//	1  found a violation, so it works in a shell loop
+//	2  the run was not reproducible, which makes every other result untrustworthy
+//	3  bad flags or a file that can't be read or written
 package main
 
 import (
@@ -24,9 +31,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/alipourhabibi/detsim/faults"
 	lockharness "github.com/alipourhabibi/detsim/harness/lockserver"
 	"github.com/alipourhabibi/detsim/protocol/lockserver"
 	"github.com/alipourhabibi/detsim/sim"
+)
+
+const (
+	exitViolation = 1
+	exitNotRepro  = 2
+	exitUsage     = 3
 )
 
 const (
@@ -38,7 +52,7 @@ const (
 )
 
 var (
-	seeds      = flag.String("seeds", "1..500", "seed range to sweep, as from..to")
+	seeds      = flag.String("seeds", "1..500", "seed range to sweep, as from..to, both included")
 	seed       = flag.Int64("seed", -1, "replay one seed instead of sweeping")
 	traceMode  = flag.String("trace", "storage", "storage, history, all or none")
 	out        = flag.String("out", "", "write the report to this file instead of stdout")
@@ -51,6 +65,19 @@ var (
 
 func main() {
 	flag.Parse()
+
+	if !oneOf(*checkMode, "invariant", "history", "liveness", "all") {
+		fmt.Fprintf(os.Stderr, "lockcheck: bad -check %q, want invariant, history, liveness or all\n", *checkMode)
+		os.Exit(exitUsage)
+	}
+	if !oneOf(*traceMode, "storage", "history", "all", "none") {
+		fmt.Fprintf(os.Stderr, "lockcheck: bad -trace %q, want storage, history, all or none\n", *traceMode)
+		os.Exit(exitUsage)
+	}
+	if !faults.Enabled {
+		fmt.Fprintln(os.Stderr, "lockcheck: built without -tags simfaults, the buggify points "+
+			"(and the skip-sync bug) are compiled out")
+	}
 
 	c := &checker{nodes: []int{0}, keep: sim.KeepAll, states: map[uint64]bool{}} // 0 is the server
 	for i := 1; i <= clients; i++ {
@@ -92,14 +119,17 @@ func (c *checker) swarm(seed uint64) (sim.NetworkConfig, sim.PlanConfig) {
 		MaxDown:     int(1 + r.Int64N(2)),
 		MaxDowntime: sim.Duration(1 + r.Int64N(leaseMs)),
 		MaxPause:    sim.Duration(1 + r.Int64N(2*leaseMs)),
-		WipeChance:  40,
-		MaxDropPPM:  200_000,
+		// No disk wipes. A single server that loses its disk loses the lock
+		// owner, and no single-server lock survives that, so every wipe of
+		// node 0 is a known failure that hides the bug this hunts for.
+		WipeChance: 0,
+		MaxDropPPM: 200_000,
 		Weights: sim.Weights{
 			Crash: weight(), Pause: weight(), Partition: weight(),
 			Isolate: weight(), DropLink: weight(), Heal: int(1 + r.Int64N(3)),
 		},
 
-		Buggify:        lockserver.AllBuggify,
+		Buggify:        buggifyNames(),
 		BuggifyPercent: int(r.Int64N(50)),
 	}
 	return net, plan
@@ -133,29 +163,52 @@ func (c *checker) sweepBuild(s uint64) (*sim.Sim, *lockharness.Cluster) {
 	return cl.Sim, cl
 }
 
+// failure is a failed check. kind says which oracle caught it, so shrinking
+// can keep the same kind of failure and not switch to another one.
+type failure struct {
+	kind string
+	err  error
+}
+
+func (f failure) Error() string { return f.kind + ": " + f.err.Error() }
+func (f failure) Unwrap() error { return f.err }
+
+// runErr names an error that came out of a sim run. kind is empty when it
+// isn't one of the sim's own errors.
+func runErr(err error) failure {
+	var inv *sim.InvariantError
+	switch {
+	case errors.Is(err, sim.ErrMaxEvents):
+		return failure{"livelock", err}
+	case errors.Is(err, sim.ErrHandlerPanic), errors.Is(err, sim.ErrFaultPanic):
+		return failure{"panic", err}
+	case errors.Is(err, sim.ErrMessageChanged):
+		return failure{"message", err}
+	case errors.As(err, &inv):
+		return failure{"invariant", err}
+	}
+	return failure{"", err}
+}
+
 func (c *checker) check(s *sim.Sim, cl *lockharness.Cluster) error {
 	only := *checkMode
 	defer c.cover(s)
 
-	if only == "liveness" {
+	if only != "all" && only != "invariant" {
 		s.ClearInvariants()
 	}
 
 	if err := s.RunUntil(until); err != nil {
-		switch {
-		case errors.Is(err, sim.ErrMaxEvents):
-			return fmt.Errorf("livelock: %w", err)
-		case errors.Is(err, sim.ErrHandlerPanic):
-			return fmt.Errorf("panic: %w", err)
-		case errors.Is(err, sim.ErrMessageChanged):
-			return fmt.Errorf("message: %w", err)
+		f := runErr(err)
+		if f.kind == "" {
+			f.kind = "run"
 		}
-		return fmt.Errorf("invariant: %w", err)
+		return f
 	}
 
 	if only == "all" || only == "history" {
 		if err := cl.CheckHistory(); err != nil {
-			return fmt.Errorf("history: %w", err)
+			return failure{"history", err}
 		}
 	}
 
@@ -163,11 +216,43 @@ func (c *checker) check(s *sim.Sim, cl *lockharness.Cluster) error {
 		// RunHealed advances the clock, and the history check should see
 		// the faulty phase only.
 		if err := cl.CheckLiveness(healBudget); err != nil {
-			return fmt.Errorf("liveness: %w", err)
+			// an invariant or panic during the healed phase is that, not a
+			// stuck service
+			if f := runErr(err); f.kind != "" {
+				return f
+			}
+			return failure{"liveness", err}
 		}
 	}
 
 	return nil
+}
+
+// kind of a check error, "" if it isn't one
+func kind(err error) string {
+	var f failure
+	if errors.As(err, &f) {
+		return f.kind
+	}
+	return ""
+}
+
+func oneOf(s string, options ...string) bool {
+	for _, o := range options {
+		if s == o {
+			return true
+		}
+	}
+	return false
+}
+
+// buggifyNames is every buggify point, or none when they are compiled out, so
+// a plan doesn't list points that can never fire.
+func buggifyNames() []string {
+	if !faults.Enabled {
+		return nil
+	}
+	return lockserver.AllBuggify
 }
 
 // cover adds the global states of one run to the sweep total.
@@ -185,9 +270,13 @@ func (c *checker) fail(s uint64, plan *sim.Plan, err error) (int, *sim.Plan) {
 	small := plan
 	if !*noShrink {
 		c.keep = 0 // shrinking only needs pass or fail, not the story
+		// keep the same kind of failure, or shrinking can trade a liveness
+		// bug for an unrelated invariant one
+		want := kind(err)
 		small = sim.Shrink(plan, func(p *sim.Plan) bool {
 			sm, scl := c.build(s, p)
-			return c.check(sm, scl) != nil
+			got := c.check(sm, scl)
+			return got != nil && kind(got) == want
 		})
 		fmt.Printf("shrunk %d faults to %d, %d buggify to %d\n",
 			plan.Len(), small.Len(), plan.BuggifyLen(), small.BuggifyLen())
@@ -198,14 +287,14 @@ func (c *checker) fail(s uint64, plan *sim.Plan, err error) (int, *sim.Plan) {
 	sm, scl := c.build(s, small)
 	if smallErr := c.check(sm, scl); smallErr != nil {
 		c.report(s, small, scl, smallErr)
-		return 1, small
+		return exitViolation, small
 	}
 
 	fmt.Fprintln(os.Stderr, "\nWARNING: the plan does not reproduce. The run is not deterministic, so nothing here can be trusted.")
 	sm, cl := c.build(s, plan)
 	c.check(sm, cl)
 	c.report(s, plan, cl, err)
-	return 2, plan
+	return exitNotRepro, plan
 }
 
 func (c *checker) report(s uint64, plan *sim.Plan, cl *lockharness.Cluster, err error) {
@@ -262,7 +351,7 @@ func openOut() (io.Writer, func()) {
 	f, err := os.Create(*out)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lockcheck: cannot write %s: %v\n", *out, err)
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
 	b := bufio.NewWriter(f)
 	return b, func() {
@@ -285,15 +374,15 @@ func (c *checker) runOne(s uint64) int {
 	return code
 }
 
-// sweep walks the range and stops at the first failure.
+// sweep runs the whole range and reports the lowest failing seed.
 func (c *checker) sweep() int {
 	from, to, err := parseRange(*seeds)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lockcheck: bad -seeds %q: %v\n", *seeds, err)
-		return 2
+		return exitUsage
 	}
 
-	fmt.Printf("sweeping seeds %d..%d\n", from, to)
+	fmt.Printf("sweeping seeds %d..%d\n", from, to-1)
 
 	f, all := sim.Sweep(from, to, c.createPlan, c.sweepBuild, c.check)
 
@@ -310,7 +399,7 @@ func (c *checker) sweep() int {
 	if errors.Is(f.Err, sim.ErrNotReproduced) {
 		// nothing to shrink: the plan passes when run again
 		fmt.Fprintf(os.Stderr, "\nWARNING: %v\nThe run is not deterministic, so nothing here can be trusted.\n", f.Err)
-		return 2
+		return exitNotRepro
 	}
 	code, small := c.fail(f.Seed, f.Plan, f.Err)
 
@@ -324,12 +413,14 @@ func (c *checker) sweep() int {
 		fmt.Fprintf(os.Stderr, "lockcheck: cannot save corpus: %v\n", err)
 	}
 
-	if code == 1 {
-		fmt.Printf("\nreplay with: go run ./cmd/lockcheck -seed %d\n", f.Seed)
+	if code == exitViolation {
+		fmt.Printf("\nreplay with: go run -tags simfaults ./cmd/lockcheck -seed %d\n", f.Seed)
 	}
 	return code
 }
 
+// parseRange reads "from..to" with both ends included, or one seed. It
+// returns the half-open range Sweep takes: to is one past the last seed.
 func parseRange(s string) (uint64, uint64, error) {
 	lo, hi, found := strings.Cut(s, "..")
 	if !found {
@@ -344,10 +435,10 @@ func parseRange(s string) (uint64, uint64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	if to <= from {
+	if to < from {
 		return 0, 0, fmt.Errorf("empty range")
 	}
-	return from, to, nil
+	return from, to + 1, nil
 }
 
 func (c *checker) saveCorpus(fails []sim.SeedFailure) error {
@@ -385,13 +476,13 @@ func (c *checker) rerunCorpus() int {
 	f, err := os.Open(*corpusPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lockcheck: %v\n", err)
-		return 2
+		return exitUsage
 	}
 	entries, err := sim.LoadCorpus(f)
 	f.Close()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lockcheck: %v\n", err)
-		return 2
+		return exitUsage
 	}
 	fmt.Printf("rerunning %d seeds from %s\n", len(entries), *corpusPath)
 
@@ -414,7 +505,7 @@ func (c *checker) rerunCorpus() int {
 		return 0
 	}
 	fmt.Printf("%d of %d seeds still fail\n", len(failed), len(entries))
-	return 1
+	return exitViolation
 }
 
 // writeBuggify prints which points the run reached and which fired.

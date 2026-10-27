@@ -85,3 +85,27 @@ func TestOverlappingLooksPastNeighbours(t *testing.T) {
 		t.Fatalf("got %+v and %+v", a, b)
 	}
 }
+
+// a client that crashes while holding is not holding anymore, so its window
+// ends at the crash, not at the end of the run
+func TestCrashEndsSpan(t *testing.T) {
+	h := newHistory()
+	h.Invoke(10, 1, "acquire", 1)
+	h.Complete(20, 1, 1)
+	h.abandonClient(1, 50)
+	spans := h.Spans("acquire", "release", 1000)
+	if len(spans) != 1 || spans[0].To != 50 {
+		t.Fatalf("got %+v, want one span ending at the crash, t=50", spans)
+	}
+}
+
+// a span closed exactly at the end of the run is closed, not left open
+func TestSpanClosedAtEndIsNotUnclosed(t *testing.T) {
+	h := newHistory()
+	h.Invoke(10, 1, "acquire", 1)
+	h.Complete(20, 1, 1)
+	h.Invoke(100, 1, "release", 2)
+	if open := Unclosed(h.Spans("acquire", "release", 100)); len(open) != 0 {
+		t.Fatalf("span released at the last instant reported as unclosed: %+v", open)
+	}
+}

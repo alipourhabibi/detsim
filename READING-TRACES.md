@@ -14,9 +14,9 @@ shrunk 54 faults to 1, 1 buggify to 1
 seed 170
 invariant: invariant broken at t=1397 #67: clients [1 3] are all inside the critical section, durable owner record says 3
   n0: granted=3
-  n1: HOLDING attempt=5
-  n2: waiting attempt=9
-  n3: HOLDING attempt=12
+  n1: HOLDING attempt=1.5
+  n2: waiting attempt=1.9
+  n3: HOLDING attempt=1.12
 
 
 schedule (1 faults):
@@ -33,6 +33,12 @@ history: 29 ops, 5 ok, 23 unknown, 1 open
 storage trace:
 a write with no sync after it, then a rollback, is the bug.
 
+t=0      #0    n1   write           client.incarnation
+t=0      #0    n1   sync
+t=0      #0    n2   write           client.incarnation
+t=0      #0    n2   sync
+t=0      #0    n3   write           client.incarnation
+t=0      #0    n3   sync
 t=1      #2    n0   write           lock.owner
 t=303    #18   n0   write           lock.owner
 t=434    #22   n0   write           lock.owner
@@ -76,13 +82,13 @@ It does two things:
 1. Decides The order: When two events happen at the same time, the smaller number runs first.
 2. It groups lines:
 ```
-t=1138   #52   n0   event           deliver 1->0 ep=0 Acquire#5
+t=1138   #52   n0   event           deliver 1->0 ep=0 Acquire#1.5
 t=1138   #52   n0   write           lock.owner
 t=1138   #52   n0   state           granted=-1 -> granted=1
 ```
 The numbers are not in order in the file. You will see this:
 ```
-t=115    #10   n0   event           deliver 2->0 ep=0 Acquire#2
+t=115    #10   n0   event           deliver 2->0 ep=0 Acquire#1.2
 t=145    #7    n3   event           timer "retry" tok=1
 ```
 #10 comes before #7. That is correct. The number is given when the event is made, not when it runs. Node 3 set its retry timer at the start, but the timer was longer, so it fired later.
@@ -117,9 +123,9 @@ The two most useful are `state` and `rollback`. Start with those.
 invariant: invariant broken at t=1397 #67: clients [1 3] are all inside the
 critical section, durable owner record says 3
   n0: granted=3
-  n1: HOLDING attempt=5
-  n2: waiting attempt=9
-  n3: HOLDING attempt=12
+  n1: HOLDING attempt=1.5
+  n2: waiting attempt=1.9
+  n3: HOLDING attempt=1.12
 ```
 
 This tells you **which nodes** (1 and 3) and **when** (1397). The lines under it
@@ -151,14 +157,14 @@ grep " state " report.txt | grep -E "n[123]" | grep HOLDING
 Keep only the clients, and only the moments they went in or out:
 
 ```
-t=2      #8    n1   state           waiting attempt=1 -> HOLDING attempt=1
-t=302    #9    n1   state           HOLDING attempt=1 -> waiting attempt=1
-t=435    #24   n1   state           waiting attempt=2 -> HOLDING attempt=2
-t=735    #25   n1   state           HOLDING attempt=2 -> waiting attempt=2
-t=739    #38   n2   state           waiting attempt=7 -> HOLDING attempt=7
-t=1039   #39   n2   state           HOLDING attempt=7 -> waiting attempt=7
-t=1139   #54   n1   state           waiting attempt=5 -> HOLDING attempt=5
-t=1397   #67   n3   state           waiting attempt=12 -> HOLDING attempt=12
+t=2      #8    n1   state           waiting attempt=1.1 -> HOLDING attempt=1.1
+t=302    #9    n1   state           HOLDING attempt=1.1 -> waiting attempt=1.1
+t=435    #24   n1   state           waiting attempt=1.2 -> HOLDING attempt=1.2
+t=735    #25   n1   state           HOLDING attempt=1.2 -> waiting attempt=1.2
+t=739    #38   n2   state           waiting attempt=1.7 -> HOLDING attempt=1.7
+t=1039   #39   n2   state           HOLDING attempt=1.7 -> waiting attempt=1.7
+t=1139   #54   n1   state           waiting attempt=1.5 -> HOLDING attempt=1.5
+t=1397   #67   n3   state           waiting attempt=1.12 -> HOLDING attempt=1.12
 ```
 
 Read down the list. Every `HOLDING` has a `-> waiting` after it, except the last
@@ -176,8 +182,8 @@ grep "t=1139 \|t=1397 " report.txt
 Look at the same time, at the `event` line:
 
 ```
-t=1139   #54   n1   event   deliver 0->1 ep=0 Granted#5
-t=1397   #67   n3   event   deliver 0->3 ep=0 Granted#12
+t=1139   #54   n1   event   deliver 0->1 ep=0 Granted#1.5
+t=1397   #67   n3   event   deliver 0->3 ep=0 Granted#1.12
 ```
 
 Both clients were told "you have the lock" by node 0.
@@ -235,10 +241,10 @@ grep "t=1138 " report.txt
 ```
 
 ```
-t=1138   #52   n0   event           deliver 1->0 ep=0 Acquire#5
+t=1138   #52   n0   event           deliver 1->0 ep=0 Acquire#1.5
 t=1138   #52   n0   buggify         lockserver/skip-sync
 t=1138   #52   n0   write           lock.owner
-t=1138   #0    n0   sent            Granted#5 -> 1
+t=1138   #0    n0   sent            Granted#1.5 -> 1
 t=1138   #52   n0   state           granted=-1 -> granted=1
 ```
 
@@ -255,7 +261,7 @@ a path your protocol marked.
 s
 ```
 t=1138   #52   n0   write           lock.owner
-t=1138   #52   n0   sent            Granted#5 -> 1
+t=1138   #52   n0   sent            Granted#1.5 -> 1
 t=1138   #52   n0   sync
 ```
 
@@ -283,16 +289,16 @@ The fourth row of that table looks like this in a trace. No crash, no rollback,
 nothing lost:
 
 ```
-t=400    #30   n2   sent      Acquire#3 -> 0
+t=400    #30   n2   sent      Acquire#1.3 -> 0
 t=500    #34   n2   timerSet  retry
-t=500    #34   n2   sent      Acquire#4 -> 0
-t=610    #41   n2   event     deliver 0->2 Granted#3
-t=610    #41   n2   state     waiting attempt=4 -> HOLDING attempt=4
+t=500    #34   n2   sent      Acquire#1.4 -> 0
+t=610    #41   n2   event     deliver 0->2 Granted#1.3
+t=610    #41   n2   state     waiting attempt=1.4 -> HOLDING attempt=1.4
 ```
 
-Step 3 finds the `-> HOLDING` at 610. Step 4 finds the `Granted#3` that caused
-it. Step 6 asks what is missing: the client is on attempt 4 and it accepted an
-answer to attempt 3. The check that should throw away an old reply is not there.
+Step 3 finds the `-> HOLDING` at 610. Step 4 finds the `Granted#1.3` that caused
+it. Step 6 asks what is missing: the client is on attempt 1.4 and it accepted an
+answer to attempt 1.3. The check that should throw away an old reply is not there.
 
 Same six steps. Different missing line.
 
@@ -306,7 +312,7 @@ takes one of those paths it writes a line:
 ```
 t=1138   #52   n0   buggify         lockserver/skip-sync
 t=1138   #52   n0   write           lock.owner
-t=1138   #0    n0   sent            Granted#5 -> 1
+t=1138   #0    n0   sent            Granted#1.5 -> 1
 ```
 
 That line says the sync was skipped on purpose. Without it you would not know
@@ -367,17 +373,18 @@ go run -tags simfaults ./cmd/lockcheck -seed 170 -trace history
 ```
 
 ```
-op1    c1 acquire    key=1    0..2 ok
-op2    c2 acquire    key=1    0..? unknown
-op11   c1 acquire    key=2    433..435 ok
-op17   c2 acquire    key=7    737..739 ok
-op24   c1 acquire    key=5    1137..1139 ok
-op28   c2 acquire    key=9    1308..? open
-op29   c3 acquire    key=12   1395..1397 ok
+op1    c1 acquire    key=4294967297 0..2 ok
+op2    c2 acquire    key=4294967297 0..? unknown
+op11   c1 acquire    key=4294967298 433..435 ok
+op17   c2 acquire    key=4294967303 737..739 ok
+op24   c1 acquire    key=4294967301 1137..1139 ok
+op28   c2 acquire    key=4294967305 1308..? open
+op29   c3 acquire    key=4294967308 1395..1397 ok
 ```
 
 Each line is one request. The two numbers are when it was sent and when the
-answer came back.
+answer came back. The key is the attempt as one number, incarnation<<32 plus
+the count, so 4294967301 is attempt 1.5: first incarnation, fifth try.
 
 There are three endings:
 
@@ -482,13 +489,13 @@ from another run:
 
 ```
 t=275    n0   pause
-t=305    n0   deferred   deliver 2->0 Acquire#4
-t=306    n0   deferred   deliver 3->0 Acquire#4
-t=315    n0   deferred   deliver 1->0 Release
+t=305    n0   deferred   deliver 2->0 Acquire#1.4
+t=306    n0   deferred   deliver 3->0 Acquire#1.4
+t=315    n0   deferred   deliver 1->0 Release#1.3
 t=522    n0   resume
-t=522    n0   deliver 2->0 Acquire#4
-t=522    n0   deliver 3->0 Acquire#4
-t=522    n0   deliver 1->0 Release
+t=522    n0   deliver 2->0 Acquire#1.4
+t=522    n0   deliver 3->0 Acquire#1.4
+t=522    n0   deliver 1->0 Release#1.3
 ```
 
 Look at `t=522`. Three messages arrive in the same instant. This is why pause
@@ -531,7 +538,7 @@ Two of them show up in this one run:
 
 ```
 t=144    #3    n1   dropped   timer "retry" tok=1  (timer superseded)
-t=374    #0    n0   dropped   deliver 2->0 ep=0 Acquire#4  (loss)
+t=374    #0    n0   dropped   deliver 2->0 ep=0 Acquire#1.4  (loss)
 ```
 
 If a message vanishes with no reason line, that is a bug in the simulator, not

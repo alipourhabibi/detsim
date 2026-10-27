@@ -1,7 +1,9 @@
 package maslave
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 
 	"github.com/alipourhabibi/detsim/protocol/maslave"
 	"github.com/alipourhabibi/detsim/sim"
@@ -14,6 +16,16 @@ const (
 type Driver struct {
 	node *maslave.Node
 	turn *sim.Turn
+}
+
+func (d *Driver) StateDigest(_ *sim.Ctx, w io.Writer) {
+	var buf [33]byte
+	buf[0] = 'm'
+	binary.LittleEndian.PutUint64(buf[1:], d.node.Round)
+	binary.LittleEndian.PutUint64(buf[9:], d.node.PingsSent)
+	binary.LittleEndian.PutUint64(buf[17:], d.node.PingsReceived)
+	binary.LittleEndian.PutUint64(buf[25:], d.node.PongsReceived)
+	w.Write(buf[:])
 }
 
 func (d *Driver) OnRestart(ctx *sim.Ctx) {
@@ -60,21 +72,26 @@ func (c clock) SetTimer(name string, after int64) {
 	c.turn.Ctx().SetTimer(name, sim.Duration(after))
 }
 
-func NewMasterSlavePinger(config sim.Config, masterNode int, slaveNodes []int) (*sim.Sim, map[int]*Driver) {
-	drivers := make(map[int]*Driver, len(slaveNodes)+1)
+// Node returns the protocol state of node id. Call it again after a restart,
+// the old one is gone.
+func Node(s *sim.Sim, id int) *maslave.Node {
+	return s.Handler(id).(*Driver).node
+}
+
+// NewMasterSlavePinger builds the sim but does not start it, so the caller
+// can add invariants or use StartWith first.
+func NewMasterSlavePinger(config sim.Config, masterNode int, slaveNodes []int) *sim.Sim {
 	newNode := func(peers []int, role maslave.Role) sim.NodeFactory {
 		return func(id int) sim.Handler {
 			tn := &sim.Turn{}
-			drv := &Driver{
+			return &Driver{
 				turn: tn,
 				node: maslave.New(id, peers, role, tickPeriod, transport{tn}, clock{tn}),
 			}
-			drivers[id] = drv
-			return drv
 		}
 	}
 
-	s := sim.New(
+	return sim.New(
 		config,
 		append([]int{masterNode}, slaveNodes...),
 		newNode(nil, maslave.Slave),
@@ -82,7 +99,4 @@ func NewMasterSlavePinger(config sim.Config, masterNode int, slaveNodes []int) (
 			masterNode, newNode(slaveNodes, maslave.Master),
 		),
 	)
-	s.Start()
-
-	return s, drivers
 }

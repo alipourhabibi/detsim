@@ -71,9 +71,15 @@ func (o Op) String() string {
 
 // History collects the operations of every client.
 type History struct {
-	ops    []Op
-	open   map[opKey]int // where an unfinished op sits in ops
-	nextID uint64
+	ops     []Op
+	open    map[opKey]int // where an unfinished op sits in ops
+	nextID  uint64
+	crashes []crash // a crash ends every span of that client
+}
+
+type crash struct {
+	client int
+	at     Time
 }
 
 type opKey struct {
@@ -156,12 +162,14 @@ func (h *History) Abandon(client int, key uint64) {
 	delete(h.open, opKey{client, key})
 }
 
-// abandonClient marks every open operation of one client Unknown.
+// abandonClient marks every open operation of one client Unknown, and notes
+// the crash so Spans can end the client's windows there.
 //
 // The sim calls this when a node crashes. The client's memory is gone, so it
 // can never match a reply again, and anything it was waiting for is now
 // unknowable
-func (h *History) abandonClient(client int) {
+func (h *History) abandonClient(client int, at Time) {
+	h.crashes = append(h.crashes, crash{client, at})
 	for k, i := range h.open {
 		if k.client == client {
 			h.ops[i].Outcome = Unknown
@@ -223,13 +231,18 @@ type Span struct {
 	From   Time
 	To     Time // when it ended, or the end of the run
 	Op     Op   // the operation that opened it
+
+	// Closed is false when the span ran to the end of the run with no close
+	// or crash. To can't tell this alone: a close at the very last instant
+	// has the same To.
+	Closed bool
 }
 
 // Spans pairs operations into windows.
 //
 // open is the kind that starts a window. close is the kind that ends it. A
 // window goes from the moment the open got its answer, to that same client's
-// next close, or to the end of the run.
+// next close or crash, or to the end of the run.
 //
 // Only Ok operations open a window. An Unknown may or may not have happened,
 // so it proves nothing on its own.
@@ -257,7 +270,14 @@ func (h *History) Spans(open, close string, endOfRun Time) []Span {
 		s := Span{Client: o.Node, From: o.Returned, To: endOfRun, Op: o}
 		for _, later := range h.ops[i+1:] {
 			if later.Node == o.Node && later.Kind == close {
-				s.To = later.Invoked
+				s.To, s.Closed = later.Invoked, true
+				break
+			}
+		}
+		// a crashed client lost what it held, even if it never sent a close
+		for _, c := range h.crashes {
+			if c.client == o.Node && c.at >= o.Returned && (!s.Closed || c.at < s.To) {
+				s.To, s.Closed = c.at, true
 				break
 			}
 		}
@@ -307,10 +327,10 @@ func Overlapping(spans []Span) (a, b Span, found bool) {
 //
 // Careful: this alone does not mean a bug. The run may have stopped while a
 // client was still working. The caller decides.
-func Unclosed(spans []Span, endOfRun Time) []Span {
+func Unclosed(spans []Span) []Span {
 	var out []Span
 	for _, s := range spans {
-		if s.To == endOfRun {
+		if !s.Closed {
 			out = append(out, s)
 		}
 	}

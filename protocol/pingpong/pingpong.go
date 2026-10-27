@@ -9,25 +9,6 @@ type Transport interface {
 	Send(to int, msg Ball)
 }
 
-type tick struct {
-	N uint64
-}
-
-func (t tick) HashInto(w io.Writer) {
-	var buf [9]byte
-	buf[0] = 't'
-	binary.LittleEndian.PutUint64(buf[1:], t.N)
-	w.Write(buf[:])
-}
-
-func (t tick) Equal(other any) bool {
-	o, ok := other.(tick)
-	if !ok {
-		return false
-	}
-	return t.N == o.N
-}
-
 type Ball struct {
 	Round  uint64
 	IsPing bool
@@ -48,7 +29,7 @@ func (b Ball) Equal(other any) bool {
 	if !ok {
 		return false
 	}
-	return b.Round == o.Round
+	return b == o // same fields as HashInto
 }
 
 type PingPong struct {
@@ -96,7 +77,7 @@ func (p *PingPong) OnTick() bool {
 }
 
 func (p *PingPong) PingDeliver(from int, msg Ball) {
-	if p.Rounds > p.Count {
+	if p.Rounds >= p.Count {
 		return
 	}
 	p.Rounds++

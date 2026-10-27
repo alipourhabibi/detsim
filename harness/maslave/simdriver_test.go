@@ -28,17 +28,20 @@ func TestMasterPingerDeterminism(t *testing.T) {
 
 	run := func(seed uint64) result {
 
+		// trace level so the hash means something, jitter so the seed does
 		config := sim.Config{
 			Seed:          seed,
 			MaxEvents:     1_000_000,
-			NetworkConfig: sim.NetworkConfig{},
+			TraceLevel:    sim.TraceHashEventsAndState,
+			NetworkConfig: sim.NetworkConfig{Delay: sim.DelaySpec{Kind: sim.DelayUniform, Spread: 20}},
 		}
-		s, drivers := NewMasterSlavePinger(config, masterID, slaveIDs())
+		s := NewMasterSlavePinger(config, masterID, slaveIDs())
+		s.Start()
 		if err := s.RunUntil(endTime); err != nil {
 			t.Fatalf("seed %d: run failed: %v", seed, err)
 		}
 
-		m := drivers[masterID].Node()
+		m := Node(s, masterID)
 
 		r := result{
 			hash:          s.Hash(),
@@ -50,7 +53,7 @@ func TestMasterPingerDeterminism(t *testing.T) {
 		}
 
 		for _, sl := range slaveIDs() {
-			r.slavePings = append(r.slavePings, drivers[sl].Node().PingsReceived)
+			r.slavePings = append(r.slavePings, Node(s, sl).PingsReceived)
 		}
 		return r
 	}

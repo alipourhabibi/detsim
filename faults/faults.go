@@ -2,7 +2,7 @@
 // lines. So you mark the window instead:
 //
 //	s.storage.Put(key, value)
-//	if faults.Enabled && s.faults.Fire("lockserver/skip-sync") {
+//	if faults.Enabled && s.faults.Buggify("lockserver/skip-sync") {
 //	    // do not sync. See what happens.
 //		return
 //	}

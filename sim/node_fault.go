@@ -60,7 +60,7 @@ func (f crashFault) Apply(s *Sim) {
 	}
 
 	s.trace.Note(EnCrash, s.now, f.Node, "", s.current)
-	s.history.abandonClient(f.Node)
+	s.history.abandonClient(f.Node, s.now)
 	if res.Wiped {
 		s.trace.Note(EnDiskWiped, s.now, f.Node, "", s.current)
 	} else if res.Lost > 0 {
