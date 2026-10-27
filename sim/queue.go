@@ -1,16 +1,19 @@
 package sim
 
-// Implements container/heap. Ordered by (At, Seq).
+// Implements container/heap. Ordered by (At, Requeued, Seq).
 type eventQueue []Event
 
 func (q eventQueue) Len() int {
 	return len(q)
 }
 
-// At first, then Seq. Never anything else.
+// At first, then Requeued, then Seq. Never anything else.
 func (q eventQueue) Less(i, j int) bool {
 	if q[i].At != q[j].At {
 		return q[i].At < q[j].At
+	}
+	if q[i].Requeued != q[j].Requeued {
+		return q[i].Requeued
 	}
 	return q[i].Seq < q[j].Seq
 }

@@ -2,6 +2,7 @@ package sim
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
@@ -393,15 +394,12 @@ func (selfSender) OnMessage(*Ctx, int, Message) {}
 func (selfSender) OnTimer(*Ctx, string)         {}
 
 func TestSelfSendPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("self-send did not panic")
-		}
-	}()
-
 	s := New(testConfig(1), []int{0, 1},
 		func(int) Handler { return selfSender{} })
 	s.Start()
+	if err := s.RunUntil(1); !errors.Is(err, ErrHandlerPanic) {
+		t.Fatalf("got %v, want ErrHandlerPanic", err)
+	}
 }
 
 func TestFaultScheduleIsDeterministic(t *testing.T) {
@@ -492,5 +490,56 @@ func TestSyncDoesNotCoverLaterWrites(t *testing.T) {
 	if string(got) != "durable" {
 		t.Fatalf("after the crash k is %q; the write that came after the Sync "+
 			"was never durable and should have rolled back", got)
+	}
+}
+
+type counterSender struct {
+	peer int
+	next int64
+	got  []int64
+}
+
+func (n *counterSender) OnRestart(ctx *Ctx) {
+	if n.peer >= 0 {
+		ctx.SetTimer("t", 10)
+	}
+}
+
+func (n *counterSender) OnTimer(ctx *Ctx, name string) {
+	n.next++
+	ctx.Send(n.peer, testMsg{N: n.next})
+	ctx.SetTimer(name, 10)
+}
+
+func (n *counterSender) OnMessage(_ *Ctx, _ int, msg Message) {
+	n.got = append(n.got, msg.(testMsg).N)
+}
+
+// node 0 is paused, node 1 keeps sending. a message that lands exactly at
+// resume time must not be delivered before the ones that waited.
+func TestResumeKeepsLinkFIFO(t *testing.T) {
+	made := map[int]*counterSender{}
+	s := New(delayedConfig(1, 10), []int{0, 1},
+		stable(made, func(id int) *counterSender {
+			if id == 0 {
+				return &counterSender{peer: -1}
+			}
+			return &counterSender{peer: 0}
+		}))
+	s.Start()
+
+	if err := s.RunUntil(50); err != nil {
+		t.Fatal(err)
+	}
+	s.InjectFault(NewPauseFault(0, 100)) // send at 140 lands at 150, the resume time
+	if err := s.RunUntil(300); err != nil {
+		t.Fatal(err)
+	}
+
+	got := made[0].got
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Fatalf("reordered after resume: %v", got)
+		}
 	}
 }

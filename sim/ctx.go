@@ -16,10 +16,11 @@ type Ctx struct {
 	pending map[string][]byte
 
 	readonly bool
+	done     bool // true after the callback that got this Ctx returns
 }
 
 func (c *Ctx) check() {
-	if c.gen != c.sim.events {
+	if c.done || c.gen != c.sim.events {
 		panic("sim: Ctx used outside the callback it was passed to")
 	}
 }
@@ -107,6 +108,11 @@ func (c *Ctx) Send(to int, msg Message) {
 
 func (c *Ctx) SetTimer(name string, after Duration) {
 	c.checkWrite()
+	if after < 0 {
+		// check it here, inside the callback, so guard turns it into an error.
+		// push would panic later, outside guard, and kill the process.
+		panic(fmt.Sprintf("sim: timer %q set with negative delay %d", name, after))
+	}
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSetTimer, Name: name, After: after})
 }
 

@@ -41,6 +41,11 @@ type Event struct {
 	Token uint64 // EvTimer only: the timer's token at schedule time
 	Name  string // EvTimer only: timer name
 
+	// Requeued is set on events that waited while the node was paused.
+	// They run before other events at the same time, so a message that
+	// lands exactly at resume time can't pass older ones on the same link.
+	Requeued bool
+
 	Payload Hashable // message body or timer name
 }
 

@@ -158,3 +158,57 @@ func TestSavedCtxPanics(t *testing.T) {
 		t.Fatalf("using a Ctx outside its callback gave %v, want ErrHandlerPanic", err)
 	}
 }
+
+type ctxKeeper struct {
+	saved *Ctx
+	steal **Ctx // use another node's Ctx in OnRestart
+}
+
+func (n *ctxKeeper) OnRestart(ctx *Ctx) {
+	if n.steal != nil {
+		(*n.steal).Put("stolen", []byte{1})
+		return
+	}
+	n.saved = ctx
+	ctx.SetTimer("t", 10)
+}
+
+func (n *ctxKeeper) OnTimer(ctx *Ctx, _ string) { n.saved = ctx }
+
+func (n *ctxKeeper) OnMessage(*Ctx, int, Message) {}
+
+// a saved Ctx must panic after its callback, even if no other event ran
+func TestCtxPanicsAfterCallbackReturns(t *testing.T) {
+	made := map[int]*ctxKeeper{}
+	s := New(testConfig(1), []int{0},
+		stable(made, func(int) *ctxKeeper { return &ctxKeeper{} }))
+	s.Start()
+	if err := s.RunUntil(10); err != nil {
+		t.Fatal(err)
+	}
+
+	defer wantPanic(t, "Send on a Ctx kept after OnTimer returned")()
+	made[0].saved.SetTimer("x", 1)
+}
+
+// in Start no event has run yet, so every OnRestart Ctx has the same gen.
+// node 1 using node 0's Ctx must still panic.
+func TestCtxFromOtherNodeStartPanics(t *testing.T) {
+	made := map[int]*ctxKeeper{}
+	s := New(testConfig(1), []int{0, 1},
+		stable(made, func(id int) *ctxKeeper {
+			k := &ctxKeeper{}
+			if id == 1 {
+				k.steal = &made[0].saved
+			}
+			return k
+		}))
+
+	s.Start()
+	if err := s.RunUntil(1); !errors.Is(err, ErrHandlerPanic) {
+		t.Fatalf("got %v, want ErrHandlerPanic", err)
+	}
+	if _, ok := s.Get(1, "stolen"); ok {
+		t.Fatal("n0 Ctx wrote to n1 disk")
+	}
+}

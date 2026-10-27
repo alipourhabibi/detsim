@@ -181,3 +181,95 @@ func TestMessageChangedAfterSend(t *testing.T) {
 		t.Fatalf("got %v, want ErrMessageChanged", err)
 	}
 }
+
+type panicky struct {
+	onBoot  bool // panic in the first OnRestart
+	negTime bool // set a negative timer from OnRestart
+}
+
+func (n *panicky) OnRestart(ctx *Ctx) {
+	if n.onBoot {
+		panic("boom at boot")
+	}
+	if n.negTime {
+		ctx.SetTimer("t", -1)
+	}
+}
+
+func (n *panicky) OnTimer(*Ctx, string)         {}
+func (n *panicky) OnMessage(*Ctx, int, Message) {}
+
+// these panics must come back as run errors. Sweep runs sims in goroutines,
+// so a panic that escapes kills the whole sweep.
+func TestPanicsBecomeRunErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		start func() *Sim
+		want  error
+	}{
+		{"panic in first OnRestart", func() *Sim {
+			s := New(testConfig(1), []int{0},
+				func(int) Handler { return &panicky{onBoot: true} })
+			s.Start()
+			return s
+		}, ErrHandlerPanic},
+		{"negative timer", func() *Sim {
+			s := New(testConfig(1), []int{0},
+				func(int) Handler { return &panicky{negTime: true} })
+			s.Start()
+			return s
+		}, ErrHandlerPanic},
+		{"factory panics on restart", func() *Sim {
+			boots := 0
+			s := New(testConfig(1), []int{0}, func(int) Handler {
+				if boots++; boots > 1 {
+					panic("factory boom")
+				}
+				return NoOpHandler{}
+			})
+			s.Start()
+			s.InjectFault(NewCrashFault(0, false, 10))
+			return s
+		}, ErrHandlerPanic},
+		{"fault Apply panics", func() *Sim {
+			s := New(testConfig(1), []int{0}, noop)
+			s.Start()
+			s.InjectFault(NewPauseFault(0, 0))
+			return s
+		}, ErrFaultPanic},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var s *Sim
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("panic escaped: %v", r)
+					}
+				}()
+				s = c.start()
+			}()
+			err := s.RunUntil(100)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+// after a panic in Start, every run method returns the error
+func TestBootErrorIsSticky(t *testing.T) {
+	s := New(testConfig(1), []int{0},
+		func(int) Handler { return &panicky{onBoot: true} })
+	s.Start()
+	for name, run := range map[string]func() error{
+		"RunUntil":          func() error { return s.RunUntil(100) },
+		"Step":              func() error { return s.Step(1) },
+		"RunUntilQuiescent": s.RunUntilQuiescent,
+		"RunHealed":         func() error { return s.RunHealed(100) },
+	} {
+		if err := run(); !errors.Is(err, ErrHandlerPanic) {
+			t.Errorf("%s: got %v, want ErrHandlerPanic", name, err)
+		}
+	}
+}

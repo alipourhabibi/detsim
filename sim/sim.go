@@ -12,6 +12,7 @@ import (
 var (
 	ErrMaxEvents      = errors.New("reached max events")
 	ErrHandlerPanic   = errors.New("handler panic")
+	ErrFaultPanic     = errors.New("fault panic")
 	ErrMessageChanged = errors.New("message changed after send")
 )
 
@@ -53,6 +54,7 @@ type Sim struct {
 	current uint64 // Seq of the event being executed, for Parent linking
 	events  uint64
 	started bool
+	bootErr error // panic from Start, every run method returns it
 
 	queue   eventQueue
 	streams *streams
@@ -190,15 +192,28 @@ func (s *Sim) Start() {
 	}
 	s.started = true
 
+	// Start has no error return, so a panic here is saved in bootErr and
+	// returned by the first run call.
 	for _, id := range s.order {
-		s.node(id).build()
+		n := s.node(id)
+		boot := Event{Kind: EvRestart, Target: id}
+		if s.bootErr = s.guard(ErrHandlerPanic, boot, n.build); s.bootErr != nil {
+			return
+		}
 		s.requireDigester(id)
 	}
 	for _, id := range s.order {
 		n := s.node(id)
 		s.effects.reset()
 		ctx := &Ctx{sim: s, self: id, out: &s.effects, gen: s.events}
-		n.handler.OnRestart(ctx)
+		boot := Event{Kind: EvRestart, Target: id}
+		s.bootErr = s.guard(ErrHandlerPanic, boot, func() {
+			defer func() { ctx.done = true }()
+			n.handler.OnRestart(ctx)
+		})
+		if s.bootErr != nil {
+			return
+		}
 		s.drain(id)
 	}
 
@@ -246,6 +261,9 @@ func (s *Sim) pushRestart(node int, at Time) uint64 {
 
 // Run modes.
 func (s *Sim) RunUntil(t Time) error {
+	if s.bootErr != nil {
+		return s.bootErr
+	}
 	for {
 		next, ok := s.queue.Peek()
 		if !ok || next.At > t {
@@ -411,8 +429,11 @@ func (s *Sim) push(e Event) uint64 {
 // but resume collapses every At to now, so the old Seq alone would reorder
 // them. The deferred slice is already in correct pop order, so re-pushing in
 // slice order with new increasing Seqs is what actually preserves it.
+// Requeued puts them before events already in the queue at now, like a
+// message sent during the pause that lands exactly at resume time.
 func (s *Sim) requeue(e Event) {
 	e.At = s.now
+	e.Requeued = true
 	s.seq++
 	e.Seq = s.seq
 	e.Parent = s.current
@@ -422,6 +443,9 @@ func (s *Sim) requeue(e Event) {
 // run - runs one step
 // return false if does nothing
 func (s *Sim) run() (bool, error) {
+	if s.bootErr != nil {
+		return false, s.bootErr
+	}
 	if s.queue.Len() == 0 {
 		return false, nil
 	}
@@ -444,7 +468,10 @@ func (s *Sim) run() (bool, error) {
 	// Harness level, never reaches handler
 	if evt.Kind == EvFault {
 		s.trace.Record(evt)
-		evt.Payload.(Fault).Apply(s)
+		apply := func() { evt.Payload.(Fault).Apply(s) }
+		if err := s.guard(ErrFaultPanic, evt, apply); err != nil {
+			return true, err
+		}
 		s.foldState()
 		s.reportStates() // a crash is exactly when beliefs change
 		if err := s.runInvariants(); err != nil {
@@ -512,12 +539,15 @@ func (s *Sim) run() (bool, error) {
 		}
 		i := s.idx(evt.Target)
 		s.streams.reseedNode(i, n.epoch)
-		n.build()
+		if err := s.guard(ErrHandlerPanic, evt, n.build); err != nil {
+			return true, err
+		}
 		s.requireDigester(evt.Target)
 		s.trace.Note(EnRestart, s.now, evt.Target, "", evt.Seq)
 	}
 
-	if err := s.guard(evt, func() {
+	if err := s.guard(ErrHandlerPanic, evt, func() {
+		defer func() { ctx.done = true }()
 		switch evt.Kind {
 		case EvRestart:
 			n.handler.OnRestart(ctx)
@@ -543,11 +573,11 @@ func (s *Sim) run() (bool, error) {
 
 // guard runs one handler call. A panic in protocol code becomes a run error,
 // so it gets a seed, a plan and a trace like any other failure.
-func (s *Sim) guard(evt Event, call func()) (err error) {
+func (s *Sim) guard(kind error, evt Event, call func()) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%w at t=%d #%d on n%d: %v",
-				ErrHandlerPanic, s.now, evt.Seq, evt.Target, r)
+				kind, s.now, evt.Seq, evt.Target, r)
 		}
 	}()
 	call()
