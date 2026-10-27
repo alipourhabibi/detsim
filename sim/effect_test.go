@@ -105,7 +105,7 @@ func TestEffectsApplyInEmissionOrder(t *testing.T) {
 			wroteAt, sentAt := -1, -1
 			for i, e := range s.Trace().Entries() {
 				switch {
-				case e.Kind == EnDurableWrite && wroteAt < 0:
+				case e.Kind == EnWrite && wroteAt < 0:
 					wroteAt = i
 				case e.Kind == EnSent && sentAt < 0:
 					sentAt = i

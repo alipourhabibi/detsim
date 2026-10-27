@@ -258,8 +258,8 @@ func (n *Network) heal(id RuleID) {
 	n.removeRule(id)
 }
 
-// healAll removes every rule and turns off per-link noise, so a healed run
-// sees a clean network: no loss, no duplication, FIFO order.
+// healAll removes every rule and puts every link back to the NetworkConfig
+// values, dropping per-link changes made by faults.
 func (n *Network) healAll() {
 	n.rules = n.rules[:0]
 	for i := range n.links {
@@ -267,9 +267,6 @@ func (n *Network) healAll() {
 			l := &n.links[i][j]
 			l.lossPPM = n.config.LossPPM
 			l.dupPPM = n.config.DuplicationPPM
-			if l.reordering {
-				l.lastArrival = 0
-			}
 			l.reordering = n.config.IsReordering
 		}
 	}
@@ -282,9 +279,6 @@ func (n *Network) perfectify() {
 			l := &n.links[i][j]
 			l.lossPPM = 0
 			l.dupPPM = 0
-			if l.reordering {
-				l.lastArrival = 0
-			}
 			l.reordering = false
 		}
 	}
@@ -310,11 +304,5 @@ func (n *Network) setDup(from, to int, ppm uint32) {
 }
 
 func (n *Network) setReordering(from, to int, on bool) {
-	l := n.link(from, to)
-	// Turning FIFO back on with a stale cursor would let a new message land
-	// before an older one. Start the ordering window here instead.
-	if l.reordering && !on {
-		l.lastArrival = 0
-	}
-	l.reordering = on
+	n.link(from, to).reordering = on
 }

@@ -151,3 +151,68 @@ func TestUnreachableAtSendIsDropped(t *testing.T) {
 		t.Fatalf("%d in-flight drops, but nothing should have been scheduled", n)
 	}
 }
+
+type namedTimer struct {
+	NoOpHandler
+	name string
+}
+
+func (n namedTimer) OnRestart(ctx *Ctx) { ctx.SetTimer(n.name, 10) }
+
+// runs that fire different timers must hash differently
+func TestHashIncludesTimerName(t *testing.T) {
+	hash := func(name string) uint64 {
+		s := New(testConfig(1), []int{0}, func(int) Handler { return namedTimer{name: name} })
+		s.Start()
+		if err := s.RunUntil(100); err != nil {
+			t.Fatal(err)
+		}
+		return s.Hash()
+	}
+	if hash("a") == hash("b") {
+		t.Fatal("timer \"a\" and timer \"b\" give the same hash")
+	}
+}
+
+// a restart of a healthy node is dropped, not recorded and then dropped
+func TestRestartOfHealthyNodeTracedOnce(t *testing.T) {
+	s := New(testConfig(1), []int{0}, noop)
+	s.Start()
+	s.InjectFault(NewRestartFault(0))
+	if err := s.RunUntil(10); err != nil {
+		t.Fatal(err)
+	}
+	ran := s.Trace().Filter(func(e Entry) bool {
+		return e.Kind == EnEvent && e.Event.Kind == EvRestart
+	})
+	if len(ran) != 0 {
+		t.Fatalf("restart recorded as run %d times, want 0", len(ran))
+	}
+}
+
+// an event that waited on a paused node keeps the parent that caused it
+func TestDeferredEventKeepsParent(t *testing.T) {
+	made := map[int]*pingOnTimer{}
+	s := New(testConfig(1), []int{0, 1},
+		stable(made, func(id int) *pingOnTimer { return &pingOnTimer{peer: 1 - id} }))
+	s.Start()
+	if err := s.RunUntil(50); err != nil {
+		t.Fatal(err)
+	}
+	s.InjectFault(NewPauseFault(0, 100))
+	if err := s.RunUntil(200); err != nil {
+		t.Fatal(err)
+	}
+
+	bySeq := map[uint64]Event{}
+	for _, e := range s.Trace().Filter(func(e Entry) bool { return e.Kind == EnEvent }) {
+		bySeq[e.Event.Seq] = e.Event
+	}
+	for _, e := range s.Trace().Filter(func(e Entry) bool {
+		return e.Kind == EnEvent && e.Event.Kind == EvDeliver && e.Event.Target == 0 && e.At == 150
+	}) {
+		if p := bySeq[e.Event.Parent]; p.Kind != EvTimer || p.Target != 1 {
+			t.Fatalf("deferred delivery has parent %+v, want n1's timer", p)
+		}
+	}
+}

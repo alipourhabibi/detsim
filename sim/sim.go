@@ -54,7 +54,7 @@ type Sim struct {
 	current uint64 // Seq of the event being executed, for Parent linking
 	events  uint64
 	started bool
-	bootErr error // panic from Start, every run method returns it
+	bootErr error // error from Start, every run method returns it
 
 	queue   eventQueue
 	streams *streams
@@ -217,7 +217,11 @@ func (s *Sim) Start() {
 		s.drain(id)
 	}
 
+	// the first OnRestart calls can already break something, check it here
+	// and not blame it on the first event
+	s.foldState()
 	s.reportStates()
+	s.bootErr = s.runInvariants()
 }
 
 // StartWith applies the plan, then starts. Buggify must be on before the first
@@ -267,7 +271,7 @@ func (s *Sim) RunUntil(t Time) error {
 	for {
 		next, ok := s.queue.Peek()
 		if !ok || next.At > t {
-			s.now = t // time passed even though nothing happened
+			s.now = max(s.now, t) // time passed even though nothing happened; never back
 			return nil
 		}
 
@@ -307,6 +311,20 @@ func (s *Sim) RunUntilQuiescent() error {
 // for a bounded stretch. Liveness has no instant to point at, so it is a run
 // mode rather than a predicate.
 func (s *Sim) RunHealed(budget Duration) error {
+	// Drop faults still planned for later, or a crash planned past the last
+	// RunUntil would fire in the middle of the healed phase.
+	kept := s.queue[:0]
+	for _, e := range s.queue {
+		if e.Kind == EvFault {
+			s.trace.Dropped(e, "cancelled by RunHealed")
+			continue
+		}
+		kept = append(kept, e)
+	}
+	clear(s.queue[len(kept):])
+	s.queue = kept
+	heap.Init(&s.queue)
+
 	// Scheduled, not applied: repairs belong in the trace and the hash like any
 	// other fault.
 	s.ScheduleFault(s.now, quiesceFault{}) // no rules, no loss, no dup, FIFO
@@ -340,7 +358,7 @@ func (s *Sim) Trace() *Trace {
 }
 
 func (s *Sim) Nodes() []int {
-	return s.order
+	return slices.Clone(s.order) // s.order is shared with the network
 }
 
 func (s *Sim) History() *History {
@@ -368,8 +386,8 @@ func (s *Sim) Handler(id int) Handler {
 	return s.node(id).handler
 }
 
-// Get reads a node's durable store directly, bypassing the handler. For
-// assertions about what survived a crash.
+// Get reads a node's store directly, bypassing the handler. It includes
+// writes that are not synced yet, so a crash can still lose them.
 func (s *Sim) Get(id int, key string) ([]byte, bool) {
 	return s.node(id).storage.Get(key)
 }
@@ -435,8 +453,7 @@ func (s *Sim) requeue(e Event) {
 	e.At = s.now
 	e.Requeued = true
 	s.seq++
-	e.Seq = s.seq
-	e.Parent = s.current
+	e.Seq = s.seq // Parent stays: the cause is still the original sender
 	heap.Push(&s.queue, e)
 }
 
@@ -519,6 +536,13 @@ func (s *Sim) run() (bool, error) {
 			ErrMessageChanged, evt.Payload, evt.Source, evt.Target, s.now, evt.Seq)
 	}
 
+	// reboot before Record, so a restart that can't happen is only traced
+	// as dropped and not also as run
+	if evt.Kind == EvRestart && !n.reboot() {
+		s.trace.Dropped(evt, "restart of a node that is not crashed")
+		return true, nil
+	}
+
 	s.trace.Record(evt)
 
 	// dispatching...
@@ -533,10 +557,6 @@ func (s *Sim) run() (bool, error) {
 	}
 
 	if evt.Kind == EvRestart {
-		if !n.reboot() {
-			s.trace.Dropped(evt, "restart of a node that is not crashed")
-			return true, nil
-		}
 		i := s.idx(evt.Target)
 		s.streams.reseedNode(i, n.epoch)
 		if err := s.guard(ErrHandlerPanic, evt, n.build); err != nil {
@@ -603,7 +623,7 @@ func (s *Sim) apply(node int, ef *Effect) {
 	switch ef.Kind {
 	case EfPut:
 		n.storage.Put(ef.Key, ef.Value)
-		s.trace.Note(EnDurableWrite, s.now, node, ef.Key, s.current)
+		s.trace.Note(EnWrite, s.now, node, ef.Key, s.current)
 	case EfSync:
 		n.storage.Sync()
 		s.trace.Note(EnSync, s.now, node, "", s.current)
@@ -621,7 +641,7 @@ func (s *Sim) apply(node int, ef *Effect) {
 		s.send(node, ef.To, ef.Msg)
 	case EfDelete:
 		n.storage.Delete(ef.Key)
-		s.trace.Note(EnDurableDelete, s.now, node, ef.Key, s.current)
+		s.trace.Note(EnDelete, s.now, node, ef.Key, s.current)
 	default:
 		panic(fmt.Sprintf("sim: unknown effect kind %v", ef.Kind))
 	}
@@ -663,11 +683,13 @@ func (s *Sim) scheduleDeliver(from, to int, payload Message, sum uint64) {
 	link := s.network.link(from, to)
 	at := s.now.Add(link.delay.Sample(s.streams.delay))
 
-	// In FIFO the ordering is preserved
+	// In FIFO the ordering is preserved. The cursor is kept up to date while
+	// reordering too, so when FIFO comes back on, new messages still go after
+	// the ones in flight.
 	if !link.reordering {
 		at = max(at, link.lastArrival+1)
-		link.lastArrival = at
 	}
+	link.lastArrival = max(link.lastArrival, at)
 
 	s.pushDeliver(from, to, at, payload, sum) // stamps dest epoch
 }

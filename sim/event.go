@@ -46,7 +46,7 @@ type Event struct {
 	// lands exactly at resume time can't pass older ones on the same link.
 	Requeued bool
 
-	Payload Hashable // message body or timer name
+	Payload Hashable // message body; nil for timers, see Name
 }
 
 func (k EventKind) String() string {

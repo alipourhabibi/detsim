@@ -44,7 +44,7 @@ const (
 	EnDuplicated
 	EnTimerSet
 	EnTimerCancelled
-	EnDurableWrite
+	EnWrite // not durable until a sync
 	EnSync
 	EnRollback // unsynced writes thrown away by a crash
 	EnCrash
@@ -58,7 +58,7 @@ const (
 	EnNote
 	EnFault
 	EnState // a node changed what it believes
-	EnDurableDelete
+	EnDelete
 )
 
 func (k EntryKind) String() string {
@@ -77,8 +77,8 @@ func (k EntryKind) String() string {
 		return "timerSet"
 	case EnTimerCancelled:
 		return "timerCancelled"
-	case EnDurableWrite:
-		return "durableWrite"
+	case EnWrite:
+		return "write"
 	case EnSync:
 		return "sync"
 	case EnRollback:
@@ -105,8 +105,8 @@ func (k EntryKind) String() string {
 		return "fault"
 	case EnState:
 		return "state"
-	case EnDurableDelete:
-		return "durableDelete"
+	case EnDelete:
+		return "delete"
 	default:
 		return "unknown"
 	}
@@ -149,7 +149,7 @@ func (e Entry) String() string {
 func (t *Trace) DumpStorage(w io.Writer) error {
 	for _, e := range t.Entries() {
 		switch e.Kind {
-		case EnDurableWrite, EnSync, EnRollback, EnDiskWiped, EnCrash, EnRestart, EnDurableDelete:
+		case EnWrite, EnSync, EnRollback, EnDiskWiped, EnCrash, EnRestart, EnDelete:
 			if _, err := fmt.Fprintln(w, e); err != nil {
 				return err
 			}
@@ -208,14 +208,22 @@ func NewTrace(level Level, keep int) *Trace {
 	return t
 }
 
-func (t *Trace) hashEvents(e Event) {
+func (t *Trace) hashEvents(kind EntryKind, e Event, reason string) {
 	t.buf = t.buf[:0]
+	t.buf = append(t.buf, byte(kind))
 	t.buf = binary.LittleEndian.AppendUint64(t.buf, uint64(e.At))
 	t.buf = binary.LittleEndian.AppendUint64(t.buf, e.Seq)
 	t.buf = append(t.buf, byte(e.Kind))
 	t.buf = binary.LittleEndian.AppendUint64(t.buf, uint64(int64(e.Target)))
 	t.buf = binary.LittleEndian.AppendUint64(t.buf, uint64(int64(e.Source)))
 	t.buf = binary.LittleEndian.AppendUint64(t.buf, e.Parent)
+	t.buf = binary.LittleEndian.AppendUint64(t.buf, e.Epoch)
+	t.buf = binary.LittleEndian.AppendUint64(t.buf, e.Token)
+	// strings are length-prefixed so "ab"+"c" and "a"+"bc" differ
+	t.buf = binary.LittleEndian.AppendUint64(t.buf, uint64(len(e.Name)))
+	t.buf = append(t.buf, e.Name...)
+	t.buf = binary.LittleEndian.AppendUint64(t.buf, uint64(len(reason)))
+	t.buf = append(t.buf, reason...)
 	t.h.Write(t.buf)
 
 	if e.Payload != nil {
@@ -368,7 +376,7 @@ func (t *Trace) emit(kind EntryKind, e Event, reason string) {
 	if t.level == TraceOff {
 		return
 	}
-	t.hashEvents(e)
+	t.hashEvents(kind, e, reason)
 	t.storeEntry(Entry{
 		Kind:   kind,
 		At:     e.At,
@@ -430,7 +438,7 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 				put(col[e.Event.Target], "* "+e.Event.Name)
 			}
 
-		case EnDurableWrite:
+		case EnWrite:
 			put(col[e.Target], "write "+e.Reason)
 		case EnSync:
 			put(col[e.Target], "SYNC")
@@ -444,7 +452,7 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 			put(col[e.Target], e.Kind.String())
 		case EnDropped:
 			put(col[e.Event.Target], "x "+e.Reason)
-		case EnDurableDelete:
+		case EnDelete:
 			put(col[e.Target], "delete "+e.Reason)
 		default:
 			continue // sends are implied by their delivery
@@ -512,7 +520,7 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int, opts MermaidOpts) error {
 
 			fmt.Fprintf(w, "  n%d->>n%d: %s\n", e.Event.Source, e.Event.Target, label)
 
-		case EnDurableWrite:
+		case EnWrite:
 			flush()
 			fmt.Fprintf(w, "  Note right of n%d: write %s\n", e.Target, e.Reason)
 		case EnSync:
@@ -537,7 +545,7 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int, opts MermaidOpts) error {
 				flush()
 				fmt.Fprintf(w, "  deactivate n%d\n", e.Target)
 			}
-		case EnDurableDelete:
+		case EnDelete:
 			flush()
 			fmt.Fprintf(w, "  Note right of n%d: delete %s\n", e.Target, e.Reason)
 		}

@@ -93,8 +93,8 @@ const (
 )
 
 // nodeStreamID mixes index and epoch into one id. The index sits in the low
-// bits and the epoch above it, so no two (index, epoch) pairs collide until a
-// node has restarted 2^24 times.
+// bits and the epoch above it, so two (index, epoch) pairs can only collide
+// once epoch<<24 overflows, after 2^40 restarts of one node.
 func nodeStreamID(i int, epoch uint64) uint64 {
 	if i < 0 || i > maxNodeIndex {
 		panic(fmt.Sprintf("sim: node index %d out of range", i))

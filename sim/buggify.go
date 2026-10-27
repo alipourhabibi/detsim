@@ -8,7 +8,7 @@ import (
 
 // Buggify says whether to take the bad path at a marked place in the protocol.
 func (c *Ctx) Buggify(name string) bool {
-	c.check()
+	c.checkWrite() // same reason as Rand
 	return c.sim.buggify(c.self, name)
 }
 

@@ -33,17 +33,17 @@ history: 29 ops, 5 ok, 23 unknown, 1 open
 storage trace:
 a write with no sync after it, then a rollback, is the bug.
 
-t=1      #2    n0   durableWrite    lock.owner
-t=303    #18   n0   durableWrite    lock.owner
-t=434    #22   n0   durableWrite    lock.owner
-t=736    #34   n0   durableWrite    lock.owner
-t=738    #36   n0   durableWrite    lock.owner
-t=1040   #50   n0   durableWrite    lock.owner
-t=1138   #52   n0   durableWrite    lock.owner
+t=1      #2    n0   write           lock.owner
+t=303    #18   n0   write           lock.owner
+t=434    #22   n0   write           lock.owner
+t=736    #34   n0   write           lock.owner
+t=738    #36   n0   write           lock.owner
+t=1040   #50   n0   write           lock.owner
+t=1138   #52   n0   write           lock.owner
 t=1332   #1    n0   crash
 t=1332   #1    n0   rollback        1 unsynced keys lost
 t=1333   #64   n0   restart
-t=1396   #65   n0   durableWrite    lock.owner
+t=1396   #65   n0   write           lock.owner
 exit status 1
 ```
 
@@ -58,7 +58,7 @@ Every `grep` on this page runs on that file.
 
 ## The line Format
 ```
-t=1138   #52   n0   durableWrite    lock.owner
+t=1138   #52   n0   write           lock.owner
 ```
 
 It has 5 parts:
@@ -68,7 +68,7 @@ It has 5 parts:
 | t=1138 | the time |
 | #52 | the event number |
 | n0 | the node |
-| durableWrite | what happened |
+| write | what happened |
 | lock.owner | extra details |
 
 ### Event Number
@@ -77,7 +77,7 @@ It does two things:
 2. It groups lines:
 ```
 t=1138   #52   n0   event           deliver 1->0 ep=0 Acquire#5
-t=1138   #52   n0   durableWrite    lock.owner
+t=1138   #52   n0   write           lock.owner
 t=1138   #52   n0   state           granted=-1 -> granted=1
 ```
 The numbers are not in order in the file. You will see this:
@@ -97,7 +97,7 @@ This is useful. A small number at a late time means something waited a long time
 | `sent` | a node sent a message |
 | `dropped` | something did not happen, and why |
 | `deferred` | the node is paused, so this waits |
-| `durableWrite` | a write to disk |
+| `write` | a write to disk |
 | `sync` | the write is now really on the disk |
 | `rollback` | a crash threw away writes that were never synced |
 | `crash` | the node died |
@@ -228,7 +228,7 @@ t=1332   #1    n0   rollback   1 unsynced keys lost
 ```
 
 One key was lost. The storage trace at the top says which write it was: the last
-`durableWrite` before the crash, at t=1138, event #52. Go there:
+`write` before the crash, at t=1138, event #52. Go there:
 
 ```
 grep "t=1138 " report.txt
@@ -237,7 +237,7 @@ grep "t=1138 " report.txt
 ```
 t=1138   #52   n0   event           deliver 1->0 ep=0 Acquire#5
 t=1138   #52   n0   buggify         lockserver/skip-sync
-t=1138   #52   n0   durableWrite    lock.owner
+t=1138   #52   n0   write           lock.owner
 t=1138   #0    n0   sent            Granted#5 -> 1
 t=1138   #52   n0   state           granted=-1 -> granted=1
 ```
@@ -246,7 +246,7 @@ The server wrote to disk. Then it told the client "you have the lock".
 
 **There is no `sync` line between them.**
 
-That is the bug. `durableWrite` only puts the data in memory. `sync` is what
+That is the bug. `write` only puts the data in memory. `sync` is what
 puts it on the real disk. The server said yes before the data was safe. Then it
 lost power, and the data was gone.
 
@@ -254,7 +254,7 @@ The `buggify` line says why the sync is missing in this run: the simulator took
 a path your protocol marked.
 s
 ```
-t=1138   #52   n0   durableWrite    lock.owner
+t=1138   #52   n0   write           lock.owner
 t=1138   #52   n0   sent            Granted#5 -> 1
 t=1138   #52   n0   sync
 ```
@@ -269,7 +269,7 @@ You find it by looking at a place where something should be and is not:
 
 | Missing line | What you see instead |
 |---|---|
-| `sync` after `durableWrite` | a `rollback` later throws the write away |
+| `sync` after `write` | a `rollback` later throws the write away |
 | `sync` before the `sent` | the sync is there, but under the reply, not above it |
 | a timeout on the server | one node holds something forever |
 | a check on an old message | a slow reply is accepted after it stopped being true |
@@ -305,7 +305,7 @@ takes one of those paths it writes a line:
 
 ```
 t=1138   #52   n0   buggify         lockserver/skip-sync
-t=1138   #52   n0   durableWrite    lock.owner
+t=1138   #52   n0   write           lock.owner
 t=1138   #0    n0   sent            Granted#5 -> 1
 ```
 

@@ -2,6 +2,7 @@ package sim
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -271,5 +272,87 @@ func TestBootErrorIsSticky(t *testing.T) {
 		if err := run(); !errors.Is(err, ErrHandlerPanic) {
 			t.Errorf("%s: got %v, want ErrHandlerPanic", name, err)
 		}
+	}
+}
+
+// time never goes back
+func TestRunUntilEarlierTimeKeepsNow(t *testing.T) {
+	s := New(testConfig(1), []int{0}, noop)
+	s.Start()
+	if err := s.RunUntil(50); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunUntil(10); err != nil {
+		t.Fatal(err)
+	}
+	if s.Now() != 50 {
+		t.Fatalf("now = %d after RunUntil(10), want 50", s.Now())
+	}
+}
+
+type randInState struct{ NoOpHandler }
+
+func (randInState) StateString(ctx *Ctx) string {
+	return fmt.Sprint(ctx.Rand().Int64N(10))
+}
+
+// StateString only runs when tracing is on, so drawing from Rand there
+// would make the trace level change the run.
+func TestReadCtxRandPanics(t *testing.T) {
+	s := New(testConfig(1), []int{0}, func(int) Handler { return randInState{} })
+	defer wantPanic(t, "Rand on a read-only Ctx")()
+	s.Start()
+}
+
+// a fault planned after the run horizon must not fire in the healed phase
+func TestRunHealedCancelsPlannedFaults(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1}, noop)
+	s.Start()
+	s.ScheduleFault(7000, NewCrashFault(0, false, 0)) // 0 downtime: stays down
+	if err := s.RunUntil(5000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunHealed(5000); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Status(0); got != Healthy {
+		t.Fatalf("n0 is %v after RunHealed, want Healthy", got)
+	}
+}
+
+type bootWriter struct{ NoOpHandler }
+
+func (bootWriter) OnRestart(ctx *Ctx) {
+	ctx.Put("booted", []byte{1})
+	ctx.Sync()
+}
+
+// a bad state made by the first OnRestart is caught at t=0, not blamed
+// on the first event
+func TestInvariantsRunAfterStart(t *testing.T) {
+	s := New(testConfig(1), []int{0}, func(int) Handler { return bootWriter{} })
+	s.AddInvariant(func(s *Sim) error {
+		if _, ok := s.Get(0, "booted"); ok {
+			return errors.New("booted")
+		}
+		return nil
+	})
+	s.Start()
+	err := s.RunUntil(100)
+	var ie *InvariantError
+	if !errors.As(err, &ie) {
+		t.Fatalf("got %v, want InvariantError", err)
+	}
+	if ie.At != 0 || ie.Seq != 0 {
+		t.Fatalf("invariant blamed on t=%d #%d, want t=0 #0", ie.At, ie.Seq)
+	}
+}
+
+// callers can't reorder the sim's node list
+func TestNodesReturnsCopy(t *testing.T) {
+	s := New(testConfig(1), []int{0, 1, 2}, noop)
+	s.Nodes()[0] = 9
+	if s.Nodes()[0] != 0 {
+		t.Fatal("Nodes returned the internal slice")
 	}
 }

@@ -543,3 +543,31 @@ func TestResetConnectionDropsInFlight(t *testing.T) {
 		t.Fatalf("%d drops for connection reset, want 1", n)
 	}
 }
+
+type oneShot struct {
+	NoOpHandler
+	got []int64
+}
+
+func (n *oneShot) OnMessage(_ *Ctx, _ int, m Message) { n.got = append(n.got, m.(testMsg).N) }
+
+// after reordering is turned off, a new message must not pass one that
+// is still in flight
+func TestFIFOAfterReorderingOff(t *testing.T) {
+	made := map[int]*oneShot{}
+	cfg := delayedConfig(1, 100)
+	cfg.NetworkConfig.IsReordering = true
+	s := New(cfg, []int{0, 1}, stable(made, func(int) *oneShot { return &oneShot{} }))
+	s.Start()
+
+	s.send(1, 0, testMsg{N: 1}) // lands at 100
+	s.network.setReordering(1, 0, false)
+	s.network.link(1, 0).delay = Constant{D: 5}
+	s.send(1, 0, testMsg{N: 2}) // would land at 5
+	if err := s.RunUntil(200); err != nil {
+		t.Fatal(err)
+	}
+	if got := made[0].got; len(got) != 2 || got[0] != 1 {
+		t.Fatalf("got %v, want [1 2]", got)
+	}
+}

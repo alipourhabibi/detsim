@@ -47,8 +47,10 @@ func (c *Ctx) Now() Time {
 }
 
 // this node's stream
+// panics on a read-only Ctx: StateString and StateDigest only run when
+// tracing is on, so a draw there would make the trace level change the run.
 func (c *Ctx) Rand() Rand {
-	c.check()
+	c.checkWrite()
 	return c.sim.nodeRand(c.self)
 }
 
