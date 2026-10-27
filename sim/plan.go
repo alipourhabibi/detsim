@@ -100,10 +100,6 @@ func (c *PlanConfig) setDefaults() {
 	if c.MaxDropPPM == 0 {
 		c.MaxDropPPM = 500_000 // 50%
 	}
-	if c.WipeChance == 0 {
-		c.WipeChance = 20
-	}
-
 	if c.MaxDown == 0 {
 		c.MaxDown = 1
 	}
@@ -244,6 +240,15 @@ func GeneratePlan(cfg PlanConfig, nodes []int, seed uint64, r Rand) *Plan {
 
 	// list of nodes and when they come back
 	downUntil := map[int]Time{}
+	// isolated nodes stay cut off until a heal-all, and count toward MaxDown
+	isolated := map[int]bool{}
+	out := func() map[int]bool {
+		m := downMap(downUntil)
+		for id := range isolated {
+			m[id] = true
+		}
+		return m
+	}
 
 	for at := Time(0); ; {
 		at = at.Add(nextGap(r, cfg.MeanGap))
@@ -261,11 +266,16 @@ func GeneratePlan(cfg PlanConfig, nodes []int, seed uint64, r Rand) *Plan {
 		switch pick(r, table, total) {
 		case kindCrash:
 			downtime := Duration(1 + r.Int64N(int64(cfg.MaxDowntime)))
-			wipe := r.Int64N(1+cfg.WipeChance) == 0 // disk loss is rare
+			// always draw, so WipeChance doesn't shift the draws after it
+			roll := r.Int64N(max(cfg.WipeChance, 1))
+			wipe := cfg.WipeChance > 0 && roll == 0 // disk loss is rare
 			// draw first
 			node, ok := pickNode(r, sorted, downMap(downUntil))
-			if !ok || len(downUntil) >= cfg.MaxDown {
+			if !ok {
 				continue
+			}
+			if o := out(); !o[node] && len(o) >= cfg.MaxDown {
+				continue // crashing an isolated node takes no one new out
 			}
 			p.Faults = append(p.Faults,
 				Scheduled{at, NewCrashFault(node, wipe, downtime)})
@@ -288,11 +298,13 @@ func GeneratePlan(cfg PlanConfig, nodes []int, seed uint64, r Rand) *Plan {
 			p.Faults = append(p.Faults, Scheduled{at, NewPartitionFault(a, b)})
 
 		case kindIsolate:
-			node, ok := pickNode(r, sorted, downMap(downUntil))
-			if !ok {
+			o := out()
+			node, ok := pickNode(r, sorted, o)
+			if !ok || len(o) >= cfg.MaxDown {
 				continue
 			}
 			p.Faults = append(p.Faults, Scheduled{at, NewIsolateFault(node)})
+			isolated[node] = true
 
 		case kindDropLink:
 			ppm := uint32(r.Int64N(int64(cfg.MaxDropPPM)))
@@ -305,6 +317,7 @@ func GeneratePlan(cfg PlanConfig, nodes []int, seed uint64, r Rand) *Plan {
 
 		case kindHeal:
 			p.Faults = append(p.Faults, Scheduled{at, NewHealFault(0)})
+			clear(isolated)
 		}
 	}
 

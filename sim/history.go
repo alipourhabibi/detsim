@@ -274,11 +274,29 @@ func (h *History) Spans(open, close string, endOfRun Time) []Span {
 //
 // Two clients doing the same thing at the same time is the bug a lock is
 // supposed to stop. These two windows are the proof.
+//
+// spans must be sorted by From, as Spans returns them. A span can overlap one
+// that is not its neighbour, so this keeps the span that ends last, and the
+// one that ends last from any other client, and checks against those.
 func Overlapping(spans []Span) (a, b Span, found bool) {
-	for i := 1; i < len(spans); i++ {
-		prev, cur := spans[i-1], spans[i]
-		if cur.Client != prev.Client && cur.From < prev.To {
-			return prev, cur, true
+	var last, other Span // latest To, and latest To from a client != last.Client
+	var haveLast, haveOther bool
+	for _, cur := range spans {
+		switch {
+		case haveLast && last.Client != cur.Client && cur.From < last.To:
+			return last, cur, true
+		case haveOther && other.Client != cur.Client && cur.From < other.To:
+			return other, cur, true
+		}
+
+		switch {
+		case !haveLast || cur.To > last.To:
+			if haveLast && last.Client != cur.Client {
+				other, haveOther = last, true
+			}
+			last, haveLast = cur, true
+		case cur.Client != last.Client && (!haveOther || cur.To > other.To):
+			other, haveOther = cur, true
 		}
 	}
 	return Span{}, Span{}, false

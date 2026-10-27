@@ -307,6 +307,11 @@ func (c *checker) sweep() int {
 	}
 
 	fmt.Printf("failed at seed %d\n", f.Seed)
+	if errors.Is(f.Err, sim.ErrNotReproduced) {
+		// nothing to shrink: the plan passes when run again
+		fmt.Fprintf(os.Stderr, "\nWARNING: %v\nThe run is not deterministic, so nothing here can be trusted.\n", f.Err)
+		return 2
+	}
 	code, small := c.fail(f.Seed, f.Plan, f.Err)
 
 	// Save the shrunk plan for this seed, it reads like a bug report.

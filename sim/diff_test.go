@@ -22,3 +22,23 @@ func TestFirstDivergenceUsesChronologicalOrder(t *testing.T) {
 		t.Fatalf("divergence at index %d, want 2 (raw ring order used?)", d.Index)
 	}
 }
+
+// notes keep their content in Reason, so two writes of different keys at the
+// same time must not count as equal
+func TestFirstDivergenceComparesNotes(t *testing.T) {
+	a, b := NewTrace(TraceHashEvents, KeepAll), NewTrace(TraceHashEvents, KeepAll)
+	a.Note(EnWrite, 5, 0, "a", 1)
+	b.Note(EnWrite, 5, 0, "b", 1)
+	if FirstDivergence(a, b) == nil {
+		t.Fatal("write a and write b look the same")
+	}
+}
+
+func TestFirstDivergenceComparesTimerNames(t *testing.T) {
+	a, b := NewTrace(TraceHashEvents, KeepAll), NewTrace(TraceHashEvents, KeepAll)
+	a.Record(Event{At: 10, Seq: 1, Kind: EvTimer, Target: 0, Source: -1, Name: "election"})
+	b.Record(Event{At: 10, Seq: 1, Kind: EvTimer, Target: 0, Source: -1, Name: "heartbeat"})
+	if FirstDivergence(a, b) == nil {
+		t.Fatal("timer election and timer heartbeat look the same")
+	}
+}

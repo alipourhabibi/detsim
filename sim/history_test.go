@@ -68,3 +68,20 @@ func TestRunModesDoNotEndTheHistory(t *testing.T) {
 		})
 	}
 }
+
+// c1's short span sits between c1's long one and c2's, so comparing only
+// neighbours misses that c1[0,100) and c2[50,60) overlap
+func TestOverlappingLooksPastNeighbours(t *testing.T) {
+	spans := []Span{
+		{Client: 1, From: 0, To: 100},
+		{Client: 1, From: 10, To: 20},
+		{Client: 2, From: 50, To: 60},
+	}
+	a, b, ok := Overlapping(spans)
+	if !ok {
+		t.Fatal("missed c1[0,100) and c2[50,60)")
+	}
+	if a.Client != 1 || a.To != 100 || b.Client != 2 {
+		t.Fatalf("got %+v and %+v", a, b)
+	}
+}

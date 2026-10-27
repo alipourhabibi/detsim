@@ -197,3 +197,42 @@ func TestSweepIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// workers finish in any order; the list must not
+func TestSweepListIsSorted(t *testing.T) {
+	check := func(_ *Sim, seed uint64) error {
+		if seed%3 == 0 {
+			return fakeErr
+		}
+		return nil
+	}
+	_, all := Sweep(1, 300, emptyPlan, trivialBuild, check)
+	for i := 1; i < len(all); i++ {
+		if all[i].Seed <= all[i-1].Seed {
+			t.Fatalf("seeds out of order at %d: %d after %d", i, all[i].Seed, all[i-1].Seed)
+		}
+	}
+}
+
+// a failure that passes on the rerun is the nondeterminism signal, it must
+// not come back looking like a normal failure
+func TestSweepFlagsFailureThatDoesNotReproduce(t *testing.T) {
+	var mu sync.Mutex
+	calls := map[uint64]int{}
+	check := func(_ *Sim, seed uint64) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls[seed]++
+		if seed == 5 && calls[seed] == 1 {
+			return fakeErr // only the first time
+		}
+		return nil
+	}
+	f, _ := Sweep(1, 10, emptyPlan, trivialBuild, check)
+	if f == nil {
+		t.Fatal("Sweep lost the failure")
+	}
+	if !errors.Is(f.Err, ErrNotReproduced) {
+		t.Fatalf("got %v, want ErrNotReproduced", f.Err)
+	}
+}

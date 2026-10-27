@@ -1,6 +1,9 @@
 package sim
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTraceRingWrapsInOrder(t *testing.T) {
 	tr := NewTrace(TraceHashEvents, 4)
@@ -214,5 +217,67 @@ func TestDeferredEventKeepsParent(t *testing.T) {
 		if p := bySeq[e.Event.Parent]; p.Kind != EvTimer || p.Target != 1 {
 			t.Fatalf("deferred delivery has parent %+v, want n1's timer", p)
 		}
+	}
+}
+
+// a broadcast to two nodes at the same time is two arrows, not one arrow and
+// a count
+func TestMermaidKeepsBroadcastArrows(t *testing.T) {
+	tr := NewTrace(TraceHashEvents, KeepAll)
+	tr.Record(Event{At: 10, Seq: 1, Kind: EvDeliver, Source: 0, Target: 1, Payload: testMsg{N: 1}})
+	tr.Record(Event{At: 10, Seq: 2, Kind: EvDeliver, Source: 0, Target: 2, Payload: testMsg{N: 1}})
+	var b strings.Builder
+	if err := tr.Mermaid(&b, []int{0, 1, 2}, MermaidOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "n0->>n2") {
+		t.Fatalf("arrow to n2 is missing:\n%s", b.String())
+	}
+}
+
+// the same retry at different times collapses into one arrow and a count
+func TestMermaidCollapsesRetriesOverTime(t *testing.T) {
+	tr := NewTrace(TraceHashEvents, KeepAll)
+	for i := range 3 {
+		tr.Record(Event{At: Time(10 * (i + 1)), Seq: uint64(i + 1), Kind: EvDeliver, Source: 0, Target: 1, Payload: testMsg{N: 1}})
+	}
+	var b strings.Builder
+	if err := tr.Mermaid(&b, []int{0, 1}, MermaidOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if n := strings.Count(out, "n0->>n1"); n != 1 {
+		t.Fatalf("%d arrows, want 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, "x3") {
+		t.Fatalf("no x3 count:\n%s", out)
+	}
+}
+
+// a span closes when its timer fires, not only when it is cancelled
+func TestMermaidSpanClosesWhenTimerFires(t *testing.T) {
+	tr := NewTrace(TraceHashEvents, KeepAll)
+	tr.Note(EnTimerSet, 10, 1, "lease", 1)
+	tr.Record(Event{At: 50, Seq: 2, Kind: EvTimer, Target: 1, Source: -1, Name: "lease"})
+	var b strings.Builder
+	if err := tr.Mermaid(&b, []int{0, 1}, MermaidOpts{SpanTimer: "lease"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "deactivate n1") {
+		t.Fatalf("span never closed:\n%s", b.String())
+	}
+}
+
+// faults belong to no node, so they must not show up in node 0's lane
+func TestLanesFaultNotInNodeZero(t *testing.T) {
+	tr := NewTrace(TraceHashEvents, KeepAll)
+	tr.Record(Event{At: 10, Seq: 1, Kind: EvFault, Target: -1, Source: -1, Payload: NewPauseFault(1, 5)})
+	var b strings.Builder
+	if err := tr.Lanes(&b, []int{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Split(strings.TrimSpace(b.String()), "\n")[1]
+	if !strings.Contains(line, "fault") || !strings.Contains(line, "paused") {
+		t.Fatalf("fault line is %q, want the fault text", line)
 	}
 }

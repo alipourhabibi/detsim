@@ -70,7 +70,11 @@ func SaveCorpus(w io.Writer, header string, entries []SeedEntry) error {
 		reason := strings.TrimSpace(strings.SplitN(e.Reason, "\n", 2)[0])
 		fmt.Fprintf(bw, "%d\t%s\n", e.Seed, reason)
 
-		// The plan goes under its seed, one tab in.
+		// The plan goes under its seed, one tab in. An empty plan still gets a
+		// line, or it loads back as nil and the rerun draws a new plan.
+		if e.Plan != nil && e.Plan.Len() == 0 && e.Plan.BuggifyLen() == 0 {
+			fmt.Fprintln(bw, "\tplan empty")
+		}
 		if e.Plan != nil {
 			for _, f := range e.Plan.Faults {
 				fmt.Fprintf(bw, "\tt=%d %s\n", f.At, f.Fault)
@@ -170,8 +174,12 @@ func MergeCorpus(old []SeedEntry, fails []SeedFailure) []SeedEntry {
 	return out
 }
 
-// addLine reads one saved plan line: "t=120 <fault>" or "buggify <name>".
+// addLine reads one saved plan line: "t=120 <fault>", "buggify <name>" or
+// "plan empty".
 func (p *Plan) addLine(text string) error {
+	if text == "plan empty" {
+		return nil // the caller already made the Plan
+	}
 	if name, ok := strings.CutPrefix(text, "buggify "); ok {
 		p.Buggify = append(p.Buggify, name)
 		return nil

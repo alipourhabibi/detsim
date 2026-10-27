@@ -343,7 +343,8 @@ for shrinking. If faults were picked during the run, removing one would change
 all the ones after it, and you could not make a small plan from a big one.
 
 `PlanConfig` also has `MaxDowntime`, `MaxPause`, `WipeChance` and `MaxDropPPM`.
-They all have defaults.
+They all have defaults, except `WipeChance`: 0 means no disk wipes, and N
+means 1 in N crashes also wipes the disk.
 
 `Weights` sets the mix. The numbers are relative, not percent. `{Crash: 3,
 Heal: 1}` means three crashes for every heal.

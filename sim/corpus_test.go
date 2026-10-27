@@ -48,3 +48,23 @@ func TestCorpusKeepsThePlan(t *testing.T) {
 		}
 	}
 }
+
+// a plan that shrank to nothing must load back as an empty plan, not as nil,
+// or the rerun draws the whole random plan from the seed again
+func TestCorpusKeepsEmptyPlan(t *testing.T) {
+	var buf bytes.Buffer
+	if err := SaveCorpus(&buf, "", []SeedEntry{{Seed: 3, Reason: "x", Plan: &Plan{}}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCorpus(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Plan == nil {
+		t.Fatalf("empty plan loaded back as %+v, want a non-nil empty plan", got)
+	}
+	if got[0].Plan.Len() != 0 || got[0].Plan.BuggifyLen() != 0 {
+		t.Fatalf("empty plan loaded back with %d faults, %d buggify",
+			got[0].Plan.Len(), got[0].Plan.BuggifyLen())
+	}
+}

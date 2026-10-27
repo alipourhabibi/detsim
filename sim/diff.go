@@ -95,17 +95,20 @@ func entriesEqual(x, y Entry) bool {
 	// Kind matters: the same event dropped in one run and dispatched in the
 	// other has an identical Event and is very much not equal.
 	//
-	// Reason does not: it is prose for humans, and it is deliberately left out
-	// of the hash for the same reason.
-	if x.Kind != y.Kind || x.At != y.At {
+	// Reason matters too: notes (write, sync, crash, ...) keep what they are
+	// about in Reason and have an empty Event.
+	if x.Kind != y.Kind || x.At != y.At || x.Seq != y.Seq || x.Parent != y.Parent ||
+		x.Source != y.Source || x.Target != y.Target || x.Reason != y.Reason {
 		return false
 	}
 	return eventsEqual(x.Event, y.Event)
 }
 
+// eventsEqual compares the same fields the hash does
 func eventsEqual(x, y Event) bool {
 	if x.At != y.At || x.Seq != y.Seq || x.Kind != y.Kind ||
-		x.Target != y.Target || x.Source != y.Source || x.Parent != y.Parent {
+		x.Target != y.Target || x.Source != y.Source || x.Parent != y.Parent ||
+		x.Epoch != y.Epoch || x.Token != y.Token || x.Name != y.Name {
 		return false
 	}
 	if x.Payload == nil || y.Payload == nil {

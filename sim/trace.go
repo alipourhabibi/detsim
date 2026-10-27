@@ -410,8 +410,20 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 
 	for _, e := range t.Entries() {
 		line := []rune(strings.Repeat(" ", width*len(nodes)))
+		whole := "" // text for an entry with no node, like a fault
 
+		// lane gives the column of a node, or -1 for no node (faults)
+		lane := func(id int) int {
+			if c, ok := col[id]; ok {
+				return c
+			}
+			return -1
+		}
 		put := func(c int, s string) {
+			if c < 0 {
+				whole = s
+				return
+			}
 			for i, r := range []rune(s) {
 				if c*width+i < len(line) {
 					line[c*width+i] = r
@@ -434,8 +446,10 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 					line[lo*width+6] = '<'
 				}
 				put(to, fmt.Sprintf("%v", e.Event.Payload))
+			} else if e.Event.Kind == EvFault {
+				put(-1, fmt.Sprintf("fault: %v", e.Event.Payload))
 			} else {
-				put(col[e.Event.Target], "* "+e.Event.Name)
+				put(lane(e.Event.Target), "* "+e.Event.Name)
 			}
 
 		case EnWrite:
@@ -451,13 +465,17 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 		case EnPause, EnResume, EnDiskWiped:
 			put(col[e.Target], e.Kind.String())
 		case EnDropped:
-			put(col[e.Event.Target], "x "+e.Reason)
+			put(lane(e.Event.Target), "x "+e.Reason)
 		case EnDelete:
 			put(col[e.Target], "delete "+e.Reason)
 		default:
 			continue // sends are implied by their delivery
 		}
 
+		if whole != "" {
+			fmt.Fprintf(w, "%-8d%s\n", e.At, whole)
+			continue
+		}
 		fmt.Fprintf(w, "%-8d%s\n", e.At, strings.TrimRight(string(line), " "))
 	}
 	return nil
@@ -466,8 +484,8 @@ func (t *Trace) Lanes(w io.Writer, nodes []int) error {
 // MermaidOpts keeps protocol names out of the trace code.
 //
 // SpanTimer is the timer that marks a span on a node, like a lease: set opens
-// it, cancel closes it. Empty means no spans. Anchor is the node the notes sit
-// over.
+// it, and cancel, firing or a crash closes it. Empty means no spans. Anchor is
+// the node the notes sit over.
 type MermaidOpts struct {
 	SpanTimer string
 	Anchor    int
@@ -482,72 +500,93 @@ func (t *Trace) Mermaid(w io.Writer, nodes []int, opts MermaidOpts) error {
 		fmt.Fprintf(w, "  participant n%d\n", id)
 	}
 
+	type arrow struct {
+		from, to int
+		label    string
+	}
 	var (
-		lastAt    Time = -1
-		repeatMsg string
-		repeatN   int
+		lastAt  Time = -1
+		repeat  arrow
+		repeatN int
+		active  = map[int]bool{} // nodes with an open span
 	)
 
+	// line prints one line, with a time marker first when the clock moved
+	// since the last printed line, so gaps are visible.
+	line := func(at Time, format string, args ...any) {
+		if at != lastAt {
+			fmt.Fprintf(w, "  Note over n%d: t=%d\n", opts.Anchor, at)
+			lastAt = at
+		}
+		fmt.Fprintf(w, format, args...)
+	}
 	flush := func() {
 		if repeatN > 1 {
-			fmt.Fprintf(w, "  Note over n%d: (%s x%d)\n", opts.Anchor, repeatMsg, repeatN)
+			fmt.Fprintf(w, "  Note over n%d: (%s x%d)\n", opts.Anchor, repeat.label, repeatN)
 		}
-		repeatN, repeatMsg = 0, ""
+		repeatN, repeat = 0, arrow{}
+	}
+	closeSpan := func(at Time, node int) {
+		if active[node] {
+			flush()
+			line(at, "  deactivate n%d\n", node)
+			delete(active, node)
+		}
 	}
 
 	for _, e := range t.Entries() {
-		// A time marker whenever the clock moves, so gaps are visible.
-		if e.At != lastAt {
-			flush()
-			fmt.Fprintf(w, "  Note over n%d: t=%d\n", opts.Anchor, e.At)
-			lastAt = e.At
-		}
-
 		switch e.Kind {
 		case EnEvent:
+			if e.Event.Kind == EvTimer && opts.SpanTimer != "" && e.Event.Name == opts.SpanTimer {
+				closeSpan(e.At, e.Event.Target)
+				continue
+			}
 			if e.Event.Kind != EvDeliver {
 				continue
 			}
-			label := fmt.Sprintf("%v", e.Event.Payload)
+			a := arrow{e.Event.Source, e.Event.Target, fmt.Sprintf("%v", e.Event.Payload)}
 
-			// Collapse a run of identical retries.
-			if label == repeatMsg {
+			// Collapse a run of identical retries, even across time: entries
+			// that print nothing don't break the run.
+			if a == repeat {
 				repeatN++
 				continue
 			}
 			flush()
-			repeatMsg, repeatN = label, 1
+			repeat, repeatN = a, 1
 
-			fmt.Fprintf(w, "  n%d->>n%d: %s\n", e.Event.Source, e.Event.Target, label)
+			line(e.At, "  n%d->>n%d: %s\n", a.from, a.to, a.label)
 
 		case EnWrite:
 			flush()
-			fmt.Fprintf(w, "  Note right of n%d: write %s\n", e.Target, e.Reason)
+			line(e.At, "  Note right of n%d: write %s\n", e.Target, e.Reason)
 		case EnSync:
 			flush()
-			fmt.Fprintf(w, "  Note right of n%d: SYNC\n", e.Target)
+			line(e.At, "  Note right of n%d: SYNC\n", e.Target)
 		case EnRollback:
 			flush()
-			fmt.Fprintf(w, "  Note over n%d: ROLLBACK %s\n", e.Target, e.Reason)
+			line(e.At, "  Note over n%d: ROLLBACK %s\n", e.Target, e.Reason)
 		case EnCrash:
+			closeSpan(e.At, e.Target) // a crash clears its timers
 			flush()
-			fmt.Fprintf(w, "  Note over n%d: CRASH\n", e.Target)
+			line(e.At, "  Note over n%d: CRASH\n", e.Target)
 		case EnRestart:
 			flush()
-			fmt.Fprintf(w, "  Note over n%d: restart\n", e.Target)
+			line(e.At, "  Note over n%d: restart\n", e.Target)
 		case EnTimerSet:
-			if opts.SpanTimer != "" && e.Reason == opts.SpanTimer {
+			// setting it again extends the span, it doesn't open a second one
+			if opts.SpanTimer != "" && e.Reason == opts.SpanTimer && !active[e.Target] {
 				flush()
-				fmt.Fprintf(w, "  activate n%d\n", e.Target)
+				line(e.At, "  activate n%d\n", e.Target)
+				active[e.Target] = true
 			}
 		case EnTimerCancelled:
 			if opts.SpanTimer != "" && e.Reason == opts.SpanTimer {
-				flush()
-				fmt.Fprintf(w, "  deactivate n%d\n", e.Target)
+				closeSpan(e.At, e.Target)
 			}
 		case EnDelete:
 			flush()
-			fmt.Fprintf(w, "  Note right of n%d: delete %s\n", e.Target, e.Reason)
+			line(e.At, "  Note right of n%d: delete %s\n", e.Target, e.Reason)
 		}
 	}
 	flush()

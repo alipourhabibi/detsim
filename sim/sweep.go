@@ -1,10 +1,15 @@
 package sim
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 )
+
+var ErrNotReproduced = errors.New("sim: failure did not reproduce")
 
 // Failure is a seed that failed, with everything needed to reproduce it.
 type Failure[T any] struct {
@@ -90,7 +95,7 @@ func Sweep[T any](
 	}()
 
 	var best *Failure[T]
-	allSeeds := make([]SeedFailure, 0, to-from)
+	var allSeeds []SeedFailure // sized by failures, not by the seed range
 	for f := range fails {
 		allSeeds = append(allSeeds, SeedFailure{
 			Seed: f.Seed,
@@ -102,12 +107,22 @@ func Sweep[T any](
 		}
 	}
 
+	// workers finish in any order
+	slices.SortFunc(allSeeds, func(a, b SeedFailure) int {
+		return cmp.Compare(a.Seed, b.Seed)
+	})
+
 	if best != nil {
 		// Again, with the trace kept, for the report.
 		best.Sim, best.Ctx = build(best.Seed)
 		best.Sim.StartWith(best.Plan)
 		if err := check(best.Sim, best.Ctx); err != nil {
 			best.Err = err
+		} else {
+			// Same seed and plan, different result: the run is not
+			// deterministic, and best.Sim is a run that passed.
+			best.Err = fmt.Errorf("%w: seed %d failed in the sweep with %v, passed on the rerun",
+				ErrNotReproduced, best.Seed, best.Err)
 		}
 	}
 	return best, allSeeds
