@@ -212,3 +212,76 @@ func TestCtxFromOtherNodeStartPanics(t *testing.T) {
 		t.Fatal("n0 Ctx wrote to n1 disk")
 	}
 }
+
+type crasher struct {
+	NoOpHandler
+	after bool // ran past the Crash call
+}
+
+func (n *crasher) OnMessage(ctx *Ctx, from int, _ Message) {
+	ctx.Put("a", []byte{1})
+	ctx.Sync()
+	ctx.Put("b", []byte{1}) // not synced: the crash loses it
+	ctx.Send(from, testMsg{N: 7})
+	ctx.Crash(50)
+	n.after = true
+	ctx.Put("c", []byte{1})
+}
+
+type counter struct {
+	NoOpHandler
+	got int
+}
+
+func (n *counter) OnMessage(*Ctx, int, Message) { n.got++ }
+
+// what the callback did before Crash still happens, then the node crashes:
+// synced writes stay, unsynced ones are lost, sends are on the wire, and the
+// rest of the callback never runs
+func TestCrashInsideCallback(t *testing.T) {
+	c := &crasher{}
+	peer := &counter{}
+	s := New(delayedConfig(1, 5), []int{0, 1}, func(id int) Handler {
+		if id == 0 {
+			return c
+		}
+		return peer
+	})
+	s.Start()
+	s.send(1, 0, testMsg{N: 1})
+	if err := s.RunUntil(20); err != nil {
+		t.Fatal(err)
+	}
+
+	if c.after {
+		t.Fatal("the callback kept running after Crash")
+	}
+	if got := s.Status(0); got != Crashed {
+		t.Fatalf("n0 is %v, want Crashed", got)
+	}
+	if _, ok := s.Get(0, "a"); !ok {
+		t.Fatal("synced write before the crash was lost")
+	}
+	for _, k := range []string{"b", "c"} {
+		if _, ok := s.Get(0, k); ok {
+			t.Fatalf("%q survived the crash", k)
+		}
+	}
+	if peer.got != 1 {
+		t.Fatalf("peer got %d messages, want the one sent before the crash", peer.got)
+	}
+	if err := s.RunUntil(100); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Status(0); got != Healthy {
+		t.Fatalf("n0 is %v after its downtime, want Healthy", got)
+	}
+}
+
+// a read only Ctx can't crash the node: StateString runs only with tracing on
+func TestCrashOnReadCtxPanics(t *testing.T) {
+	s := New(testConfig(1), []int{0}, noop)
+	s.Start()
+	defer wantPanic(t, "Crash on a read-only Ctx")()
+	s.ReadCtx(0).Crash(1)
+}

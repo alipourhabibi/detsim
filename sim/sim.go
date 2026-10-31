@@ -215,6 +215,9 @@ func (s *Sim) Start() {
 			return
 		}
 		s.drain(id)
+		if ctx.crash {
+			s.crashNode(id, false, ctx.crashDowntime, "in OnRestart")
+		}
 	}
 
 	// the first OnRestart calls can already break something, check it here
@@ -583,6 +586,9 @@ func (s *Sim) run() (bool, error) {
 	}
 
 	s.drain(evt.Target)
+	if ctx.crash {
+		s.crashNode(evt.Target, false, ctx.crashDowntime, "in callback")
+	}
 	s.foldState()
 	s.reportStates()
 	if err := s.runInvariants(); err != nil {
@@ -596,6 +602,9 @@ func (s *Sim) run() (bool, error) {
 func (s *Sim) guard(kind error, evt Event, call func()) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			if _, ok := r.(crashHere); ok {
+				return // Ctx.Crash: the callback stops here, the run goes on
+			}
 			err = fmt.Errorf("%w at t=%d #%d on n%d: %v",
 				kind, s.now, evt.Seq, evt.Target, r)
 		}

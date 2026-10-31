@@ -17,6 +17,9 @@ type Ctx struct {
 
 	readonly bool
 	done     bool // true after the callback that got this Ctx returns
+
+	crash         bool     // Crash was called, crash the node after the drain
+	crashDowntime Duration // how long it stays down, 0 for good
 }
 
 func (c *Ctx) check() {
@@ -156,3 +159,26 @@ func (c *Ctx) Sync() {
 	c.checkWrite()
 	c.out.buf = append(c.out.buf, Effect{Kind: EfSync})
 }
+
+// Crash crashes this node right here, in the middle of the callback.
+//
+// What the callback did before it still happens: writes reach the disk,
+// sends go on the wire, and a Sync before it makes writes durable. Then the
+// node crashes: unsynced writes are lost, its timers are gone and the rest of
+// the callback never runs. It comes back after downtime, 0 means it stays
+// down.
+//
+// A crash fault only lands between callbacks, so it can never split one in
+// two. Put this behind a Buggify point where a crash hurts, like between two
+// writes that must go together, or after a reply and before its write.
+func (c *Ctx) Crash(downtime Duration) {
+	c.checkWrite()
+	if downtime < 0 {
+		panic(fmt.Sprintf("sim: Crash with negative downtime %d", downtime))
+	}
+	c.crash, c.crashDowntime = true, downtime
+	panic(crashHere{})
+}
+
+// crashHere stops the callback for Crash. guard catches it, it is no error.
+type crashHere struct{}

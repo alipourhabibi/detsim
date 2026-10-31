@@ -450,6 +450,24 @@ Crash, pause and partition are three different problems. Do not mix them up:
 The third one is why partitions find bugs that crashes do not. The node still
 thinks it is the leader.
 
+A crash fault only lands between two callbacks, so a callback always runs to
+the end. To crash a node in the middle of one, call `ctx.Crash(downtime)`,
+usually behind a buggify point (see below):
+
+```go
+ctx.Put("log/1", entry)
+ctx.Sync()
+if ctx.Buggify("raft/crash-mid-append") {
+	ctx.Crash(100) // the log is half written, the node dies here
+}
+ctx.Put("log/last", one)
+```
+
+What the callback did before `Crash` still happens: writes reach the disk,
+sends go on the wire, a `Sync` makes writes durable. Then the node crashes like
+with `NewCrashFault`: unsynced writes are lost, the rest of the callback never
+runs, and it comes back after `downtime` (0: stays down).
+
 ### Network faults
 
 | Function | What it does |
@@ -606,7 +624,8 @@ A `!` means the code never ran that line. That point is doing nothing for you.
 ### Where to put them
 
 * after a write to disk, before the reply
-* between two writes that should be one
+* between two writes that should be one; with `ctx.Crash` there, the node dies
+  with only the first one done
 * in a retry or backoff path
 * when a node becomes leader
 

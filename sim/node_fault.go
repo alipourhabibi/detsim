@@ -53,22 +53,27 @@ func (f crashFault) Equal(other any) bool {
 
 // node_fault.go
 func (f crashFault) Apply(s *Sim) {
-	res := s.node(f.Node).crash(f.WipeDisk)
+	s.crashNode(f.Node, f.WipeDisk, f.Downtime, "")
+}
+
+// crashNode is a crash fault and Ctx.Crash both. why goes in the trace.
+func (s *Sim) crashNode(id int, wipe bool, downtime Duration, why string) {
+	res := s.node(id).crash(wipe)
 	if !res.Crashed {
-		s.trace.Note(EnNote, s.now, f.Node, "crash ignored: already down", s.current)
+		s.trace.Note(EnNote, s.now, id, "crash ignored: already down", s.current)
 		return
 	}
 
-	s.trace.Note(EnCrash, s.now, f.Node, "", s.current)
-	s.history.abandonClient(f.Node, s.now)
+	s.trace.Note(EnCrash, s.now, id, why, s.current)
+	s.history.abandonClient(id, s.now)
 	if res.Wiped {
-		s.trace.Note(EnDiskWiped, s.now, f.Node, "", s.current)
+		s.trace.Note(EnDiskWiped, s.now, id, "", s.current)
 	} else if res.Lost > 0 {
-		s.trace.Note(EnRollback, s.now, f.Node, fmt.Sprintf("%d unsynced keys lost", res.Lost), s.current)
+		s.trace.Note(EnRollback, s.now, id, fmt.Sprintf("%d unsynced keys lost", res.Lost), s.current)
 	}
 
-	if f.Downtime > 0 {
-		s.pushRestart(f.Node, s.now.Add(f.Downtime))
+	if downtime > 0 {
+		s.pushRestart(id, s.now.Add(downtime))
 	}
 }
 
